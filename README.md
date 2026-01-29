@@ -10,7 +10,7 @@ ShadowLink is a specialized, local-only VPN tunnel designed for maximum privacy 
 
 -   **Double Encryption**:
     -   **Layer 1**: ShadowLink (AES-256-GCM) - Encryption happens *inside* your User Space.
-    -   **Layer 2**: Your System VPN (e.g., ProtonVPN) - Encryption happens at the Network Interface level.
+    -   **Layer 2**: Your System VPN (e.g., ProtonVPN, NordVPN, etc.) - Encryption happens at the Network Interface level.
 -   **Maximum Security Protocol**:
     -   **AES-256-GCM**: Military-grade encryption for the data payload.
     -   **X25519 (Curve25519)**: Ephemeral Elliptic Curve Diffie-Hellman Key Exchange.
@@ -23,37 +23,46 @@ ShadowLink is a specialized, local-only VPN tunnel designed for maximum privacy 
 
 ## 🏗️ Architecture
 
-ShadowLink differs from traditional VPNs by acting as a **Pre-Encryption Wrapper**.
+![Architecture Schematic](docs/architecture.png)
+
+### Data Flow Diagram
 
 ```mermaid
-graph TD
-    subgraph Localhost ["Your PC (Localhost)"]
-        Browser["Browser / App"] -->|"Plain SOCKS5"| Client["ShadowLink Client :1080"]
-        Client == "Layer 1 Encrypted (AES-256)" ==> Server["ShadowLink Server :8443"]
+flowchart LR
+    %% Styles
+    classDef client fill:#2d2d2d,stroke:#00ff41,stroke-width:2px,color:#fff;
+    classDef server fill:#1a1a1a,stroke:#00bfff,stroke-width:2px,color:#fff;
+    classDef vpn fill:#1a1a1a,stroke:#ff00ff,stroke-width:2px,stroke-dasharray: 5 5,color:#fff;
+    classDef internet fill:#000000,stroke:#fff,stroke-width:1px,color:#fff;
+    classDef warning fill:#3d0000,stroke:#ff0000,stroke-width:2px,color:#fff;
+
+    subgraph UserPC ["🖥️ YOUR PC (Localhost)"]
+        direction LR
+        App[("📱 Application<br/>(Browser/Game)")] -->|Plain Traffic| Client["🔒 Client<br/>(Encyptor)"]
+        Client ===|"⚡ Layer 1: AES-256"| Server["🛡️ Server<br/>(Decryptor)"]
         
-        Server -- "Strict Mode Check (Kill Switch)" --> Check{"Public IP != ISP?"}
-        Check -- "Safe" --> OS["OS Network Stack"]
-        Check -- "Unsafe" --> Block["BLOCK TRAFFIC"]
-        
-        style Client fill:#333,stroke:#0ff,stroke-width:2px,color:#fff
-        style Server fill:#333,stroke:#f0f,stroke-width:2px,color:#fff
-        style Check fill:#550,stroke:#ff0,stroke-width:2px,color:#fff
+        Server --"Strict Mode Check"--> Gate{"Safe IP?"}
     end
-    
-    subgraph System ["System Network Level"]
-        OS -->|"VPN On"| Proton["ProtonVPN / Upstream VPN"]
-        OS -.->|"VPN Off"| Direct["ISP Gateway (Unmasked)"]
+
+    subgraph System ["🌐 SYSTEM NETWORK"]
+        direction LR
+        Gate --"Yes"--> SysStack["Network Interface"]
+        Gate --"No"--> KillSwitch["⛔ BLOCK"]
         
-        Proton == "Layer 2 Encrypted (Tunnel)" ==> Masked["ISP Gateway (Masked)"]
+        SysStack -.->|"Plain ISP Traffic"| ISP_Danger["⚠️ Unsafe ISP Node"]
+        SysStack ==>|"⚡ Layer 2: VPN"| Proton["🛡️ ProtonVPN"]
     end
-    
-    Masked --> Internet
-    Direct --> Internet
-    
-    classDef secure fill:#004d00,stroke:#0f0,color:#fff;
-    classDef danger fill:#4d0000,stroke:#f00,color:#fff;
-    class Proton secure;
-    class Direct danger;
+
+    Proton ==>|"Double Encrypted"| ISP_Safe["☁️ ISP Gateway"]
+    ISP_Safe --> WWW(("🌍 Internet"))
+    ISP_Danger --> WWW
+
+    %% Apply Styles
+    class App,SysStack client;
+    class Client,Server server;
+    class Proton vpn;
+    class WWW internet;
+    class KillSwitch,ISP_Danger warning;
 ```
 
 ## ❓ What Makes It Different?
