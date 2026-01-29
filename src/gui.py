@@ -64,6 +64,9 @@ class ShadowLinkApp(ctk.CTk):
         self.switch_strict = ctk.CTkSwitch(self.controls_frame, text="STRICT MODE (Kill Switch)")
         self.switch_strict.pack(pady=10)
 
+        self.switch_sysproxy = ctk.CTkSwitch(self.controls_frame, text="SYSTEM-WIDE PROXY (All Apps)")
+        self.switch_sysproxy.pack(pady=10)
+
         # Logs
         self.log_box = ctk.CTkTextbox(self.main_frame, font=("Consolas", 12), text_color="#00ff41", fg_color="black")
         self.log_box.grid(row=2, column=0, sticky="nsew")
@@ -91,18 +94,33 @@ class ShadowLinkApp(ctk.CTk):
         
         # Start Threads
         strict = self.switch_strict.get() == 1
+        sysproxy_on = self.switch_sysproxy.get() == 1
         
         self.server_thread = threading.Thread(target=self.run_server, args=(strict,), daemon=True)
         self.client_thread = threading.Thread(target=self.run_client, daemon=True)
         
         self.server_thread.start()
         self.client_thread.start()
+        
+        # Enable System Proxy if requested
+        if sysproxy_on:
+             from sysproxy import SystemProxyManager
+             if SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, True):
+                 self.log("System-Wide Proxy ENABLED")
+             else:
+                 self.log("ERROR: Could not set System Proxy")
 
     def stop_services(self):
         # Graceful shutdown is hard with asyncio.run in threads without complex signaling
         # For this PoC, we rely on daemon threads dying when app closes or just "abandoning" them
         # Ideally, we'd use a stop event.
         self.running = False
+        
+        # Disable System Proxy always on stop
+        from sysproxy import SystemProxyManager
+        SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, False)
+        self.log("System-Wide Proxy DISABLED")
+        
         self.btn_connect.configure(text="INITIALIZE LINK", fg_color="forestgreen")
         self.status_indicator.configure(text="OFFLINE", text_color="red")
         self.log("Stopping Services (Restart App to fully reset threads)")

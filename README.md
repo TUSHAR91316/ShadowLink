@@ -17,6 +17,8 @@ ShadowLink is a specialized, local-only VPN tunnel designed for maximum privacy 
     -   **Forward Secrecy**: A unique, random session key is generated for **every single connection**. Keys exist only in RAM and are wiped on disconnect.
 -   **Strict Mode (Kill Switch)**:
     -   Optionally blocks traffic if it detects your public IP matches your ISP's IP (prevents accidental leaks if your VPN drops).
+-   **System-Wide Proxy (New)**:
+    -   Automatically routes **ALL** Windows applications (Chrome, Edge, etc.) through ShadowLink with a single toggle. No manual browser config needed.
 -   **Cyber-Aesthetic GUI**:
     -   Built with `customtkinter` for a modern, dark-mode "hacker" aesthetic.
     -   Real-time bandwidth visualization.
@@ -25,44 +27,45 @@ ShadowLink is a specialized, local-only VPN tunnel designed for maximum privacy 
 
 ![Architecture Schematic](docs/architecture.png)
 
+
 ### Data Flow Diagram
 
 ```mermaid
-flowchart LR
-    %% Styles
-    classDef client fill:#2d2d2d,stroke:#00ff41,stroke-width:2px,color:#fff;
-    classDef server fill:#1a1a1a,stroke:#00bfff,stroke-width:2px,color:#fff;
-    classDef vpn fill:#1a1a1a,stroke:#ff00ff,stroke-width:2px,stroke-dasharray: 5 5,color:#fff;
-    classDef internet fill:#000000,stroke:#fff,stroke-width:1px,color:#fff;
-    classDef warning fill:#3d0000,stroke:#ff0000,stroke-width:2px,color:#fff;
+graph TD
+    %% Professional Corporate Theme
+    classDef userNode fill:#2c3e50,stroke:#34495e,stroke-width:2px,color:#ecf0f1;
+    classDef shadowLink fill:#2980b9,stroke:#3498db,stroke-width:2px,color:#fff;
+    classDef checkNode fill:#f39c12,stroke:#e67e22,stroke-width:2px,color:#fff;
+    classDef vpnNode fill:#27ae60,stroke:#2ecc71,stroke-width:2px,color:#fff;
+    classDef internetNode fill:#95a5a6,stroke:#7f8c8d,stroke-width:2px,color:#fff;
+    classDef dangerNode fill:#c0392b,stroke:#e74c3c,stroke-width:2px,color:#fff;
 
-    subgraph UserPC ["🖥️ YOUR PC (Localhost)"]
-        direction LR
-        App[("📱 Application<br/>(Browser/Game)")] -->|Plain Traffic| Client["🔒 Client<br/>(Encyptor)"]
-        Client ===|"⚡ Layer 1: AES-256"| Server["🛡️ Server<br/>(Decryptor)"]
+    subgraph Localhost ["💻 User Workstation (Localhost)"]
+        Browser["🌐 Browser / Application"] -->|"Plain SOCKS5 Traffic"| Client["🔒 ShadowLink Client<br/>(Layer 1 Encryption)"]
+        Client == "Encrypted Tunnel (AES-256)" ==> Server["🛡️ ShadowLink Server<br/>(Decryption & Logic)"]
         
-        Server --"Strict Mode Check"--> Gate{"Safe IP?"}
+        Server -- "Strict Mode Verification" --> Check{"Is IP Safe?"}
+        Check -- "Safe / Strict Off" --> OS["⚙️ OS Network Stack"]
+        Check -- "Unsafe (ISP Detected)" --> Block["⛔ BLOCK TRAFFIC"]
     end
-
-    subgraph System ["🌐 SYSTEM NETWORK"]
-        direction LR
-        Gate --"Yes"--> SysStack["Network Interface"]
-        Gate --"No"--> KillSwitch["⛔ BLOCK"]
+    
+    subgraph System ["🌍 Network Infrastructure"]
+        OS -.->|"VPN OFF (Unprotected)"| Direct["⚠️ ISP Gateway"]
+        OS -->|"VPN ON (Protected)"| Proton["🛡️ System VPN<br/>(Layer 2 Encryption)"]
         
-        SysStack -.->|"Plain ISP Traffic"| ISP_Danger["⚠️ Unsafe ISP Node"]
-        SysStack ==>|"⚡ Layer 2: VPN"| Proton["🛡️ ProtonVPN"]
+        Proton == "Double Encrypted Traffic" ==> Masked["☁️ ISP Gateway (Masked)"]
     end
-
-    Proton ==>|"Double Encrypted"| ISP_Safe["☁️ ISP Gateway"]
-    ISP_Safe --> WWW(("🌍 Internet"))
-    ISP_Danger --> WWW
-
+    
+    Masked --> Internet(("☁️ Global Internet"))
+    Direct --> Internet
+    
     %% Apply Styles
-    class App,SysStack client;
-    class Client,Server server;
-    class Proton vpn;
-    class WWW internet;
-    class KillSwitch,ISP_Danger warning;
+    class Browser,OS userNode;
+    class Client,Server shadowLink;
+    class Check checkNode;
+    class Proton,Masked vpnNode;
+    class Direct,Block dangerNode;
+    class Internet internetNode;
 ```
 
 ## ❓ What Makes It Different?
