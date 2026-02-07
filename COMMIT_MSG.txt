@@ -13,10 +13,20 @@ KEY CHANGES:
 - **Packaging**: Configured `electron-builder` to bundle the compiled Python executable (`api.exe`) into a Windows installer.
 - **Security**: Added `src/verify_encryption.py` to cryptographically verify the correct implementation of X25519 key exchange + AES-256-GCM encryption.
 
+COMPARISON (Standard SOCKS5 vs ShadowLink):
+- Encryption: None vs AES-256-GCM
+- Key Management: Static vs Ephemeral X25519 (New key/session)
+- Purpose: IP Masking vs Traffic Obfuscation & Layered Security
+- Dependency: Remote Server vs Local-Only
+
+LIMITATIONS:
+- TCP Only (UDP not supported yet).
+- Checking packets adds slight latency.
+- Requires Node.js v18+ for development.
+
 BREAKING CHANGES:
 - The application can no longer be launched via `python src/gui.py`.
 - Users must build the Electron app (`npm run build:win`) or run in dev mode (`npm run dev`).
-- System requirements now include Node.js v18+ for development.
 
 DEPRECATED:
 - `src/gui.py`: Removed/Deprecated in favor of `src/api.py` and the Electron frontend.

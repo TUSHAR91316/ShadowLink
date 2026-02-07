@@ -19,6 +19,24 @@ ShadowLink uses a hybrid architecture:
 - **Backend**: Python (compiled to single-file executable), handling specific encryption and socket operations.
 - **IPC**: The frontend communicates with the backend via standard input/output (stdio) using JSON-RPC.
 
+## ❓ What Makes It Different?
+
+| Feature | Standard SOCKS5 Proxy | ShadowLink |
+| :--- | :--- | :--- |
+| **Encryption** | None (Usually plaintext) | **AES-256-GCM** |
+| **Key Management** | Static Password / None | **Ephemeral X25519** (New key per session) |
+| **Purpose** | IP Masking | **Traffic Obfuscation** & Layered Security |
+| **Dependency** | Remote Server | **Local-Only** (Server runs on your localhost) |
+
+**Why use this locally?** 
+It isolates your application traffic from the rest of the OS until it is fully encrypted. Even if malware on your PC packet-sniffs your network card, they only see the encrypted ShadowLink traffic, not the raw application data.
+
+## ⚠️ Limitations
+
+1.  **TCP Only**: Currently supports SOCKS5 CONNECT method (TCP). UDP (e.g., for gaming/VoIP) is not yet supported.
+2.  **Performance Overhead**: Double encryption (ShadowLink + ProtonVPN) adds a small amount of latency and CPU overhead.
+3.  **Manual Proxy Config**: You must configure your browser/app to use the provided SOCKS5 proxy if not using System-Wide mode.
+
 ## 📦 Installation & Build
 
 ### Prerequisites
