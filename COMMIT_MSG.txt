@@ -1,0 +1,24 @@
+feat(core): migrate UI to Electron + React hybrid architecture
+
+Replaces the legacy CustomTkinter GUI with a modern, high-performance Electron + React frontend while maintaining the secure Python backend logic.
+
+KEY CHANGES:
+- **Architecture**: Split application into separate frontend (Electron/React) and backend (Python) processes communicated via JSON-RPC over stdio.
+- **Frontend**: Initiated `electron-vite` project with React, TypeScript, TailwindCSS, and Framer Motion for a polished, animated UI.
+- **Backend API**: Created `src/api.py` as the new headless entry point, replacing `gui.py`. Handles key exchange, encryption, and socket management as a subprocess.
+- **Build Pipeline**: Implemented a robust manual build system to resolve tooling conflicts:
+  - `npm run build:css`: Generates Tailwind styles via CLI.
+  - `npm run build:main`: Compiles Electron main process with esbuild.
+  - `npm run build:renderer`: Bundles React app with Vite.
+- **Packaging**: Configured `electron-builder` to bundle the compiled Python executable (`api.exe`) into a Windows installer.
+- **Security**: Added `src/verify_encryption.py` to cryptographically verify the correct implementation of X25519 key exchange + AES-256-GCM encryption.
+
+BREAKING CHANGES:
+- The application can no longer be launched via `python src/gui.py`.
+- Users must build the Electron app (`npm run build:win`) or run in dev mode (`npm run dev`).
+- System requirements now include Node.js v18+ for development.
+
+DEPRECATED:
+- `src/gui.py`: Removed/Deprecated in favor of `src/api.py` and the Electron frontend.
+
+Resolves: #MIGRATION-001
