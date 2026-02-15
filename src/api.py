@@ -85,12 +85,19 @@ class ShadowAPI:
         asyncio.set_event_loop(loop)
         self.loop_server = loop
         
-        server = ShadowServer(strict_mode=strict, safe_isp_ip=Config.ISP_IP_MARKER)
-        self.send_event("log", {"message": f"Server Host initialized (Strict: {strict})"})
         try:
+            # Check port first or just try to start? 
+            # asyncio start() usually binds port.
+            server = ShadowServer(strict_mode=strict, safe_isp_ip=Config.ISP_IP_MARKER)
+            self.send_event("log", {"message": f"Server Host initialized (Strict: {strict})"})
             loop.run_until_complete(server.start())
         except Exception as e:
             logging.error(f"Server error: {e}")
+            self.send_event("log", {"message": f"Server Error: {str(e)}"})
+            self.send_event("status", {"state": "stopped"})
+            # We should probably stop the client too if server fails
+            # But self.stop_services() might be tricky from a thread if it touches shared state poorly
+            # For now, sending stopped status is enough to inform UI.
 
     def run_client(self):
         loop = asyncio.new_event_loop()
@@ -103,6 +110,8 @@ class ShadowAPI:
             loop.run_until_complete(client.start())
         except Exception as e:
             logging.error(f"Client error: {e}")
+            self.send_event("log", {"message": f"Client Error: {str(e)}"})
+            self.send_event("status", {"state": "stopped"})
 
     def process_stats(self):
         """Check stats queue and send events"""

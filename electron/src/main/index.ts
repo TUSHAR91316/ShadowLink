@@ -62,10 +62,17 @@ function getScriptPath(): string[] {
 function startPython() {
     const exe = getPythonPath();
     const args = getScriptPath();
+    // Calculate project root: electron/out/main -> ../../../
+    const rootDir = path.resolve(__dirname, '../../../');
 
-    console.log(`Starting Python: ${exe} ${args.join(' ')}`)
+    console.log(`Starting Python: ${exe} ${args.join(' ')} in ${rootDir}`)
 
-    pythonProcess = spawn(exe, args);
+    try {
+        pythonProcess = spawn(exe, args, { cwd: rootDir });
+    } catch (error) {
+        console.error('Failed to spawn python process:', error);
+        return;
+    }
 
     if (pythonProcess.stdout) {
         pythonProcess.stdout.on('data', (data) => {
@@ -77,7 +84,6 @@ function startPython() {
                     const json = JSON.parse(line);
                     // Send to renderer
                     mainWindow?.webContents.send('python-event', json);
-                    console.log('Python Event:', json);
                 } catch (e) {
                     console.log('Python Stdout (text):', line);
                 }
