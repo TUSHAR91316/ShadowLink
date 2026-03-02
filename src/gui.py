@@ -1,162 +1,163 @@
-import customtkinter as ctk
+import sys
 import threading
-import asyncio
-import queue
-import time
-from config import Config
-from client import ShadowClient
-from server import ShadowServer
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QPushButton, QLabel, QTextEdit, 
+                             QCheckBox, QGroupBox)
+from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot
+from PyQt6.QtGui import QFont
 
-# Theme Settings
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("green")
+from api import ShadowAPI
 
-class ShadowLinkApp(ctk.CTk):
+class APIWorkerSignals(QObject):
+    log_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(str)
+    stats_signal = pyqtSignal(dict)
+
+class ShadowLinkGUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("ShadowLink Native GUI")
+        self.resize(550, 450)
 
-        self.title("ShadowLink - Secure Tunnel")
-        self.geometry("800x600")
-        self.resizable(False, False)
-        
-        # Data
-        self.running = False
-        self.stats_queue = queue.Queue()
-        self.log_queue = queue.Queue()
-        
-        # Layout
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.signals = APIWorkerSignals()
+        self.signals.log_signal.connect(self.on_log)
+        self.signals.status_signal.connect(self.on_status)
+        self.signals.stats_signal.connect(self.on_stats)
 
-        # Header
-        self.header_frame = ctk.CTkFrame(self, height=80, corner_radius=0)
-        self.header_frame.grid(row=0, column=0, sticky="ew")
-        
-        self.logo_label = ctk.CTkLabel(self.header_frame, text="SHADOWLINK", font=("Orbitron", 24, "bold"), text_color="#00ff41")
-        self.logo_label.pack(side="left", padx=20, pady=20)
-        
-        self.status_indicator = ctk.CTkLabel(self.header_frame, text="OFFLINE", text_color="red", font=("Roboto", 14))
-        self.status_indicator.pack(side="right", padx=20)
+        self.api = ShadowAPI(event_callback=self.api_callback)
 
-        # Main Content
-        self.main_frame = ctk.CTkFrame(self)
-        self.main_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=20)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-        
-        # Stats Area
-        self.stats_frame = ctk.CTkFrame(self.main_frame)
-        self.stats_frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
-        
-        self.lbl_speed_up = ctk.CTkLabel(self.stats_frame, text="UPLOAD: 0 KB/s", font=("Consolas", 14))
-        self.lbl_speed_up.pack(side="left", padx=20, pady=10)
-        
-        self.lbl_speed_down = ctk.CTkLabel(self.stats_frame, text="DOWNLOAD: 0 KB/s", font=("Consolas", 14))
-        self.lbl_speed_down.pack(side="right", padx=20, pady=10)
+        self.init_ui()
 
-        # Controls
-        self.controls_frame = ctk.CTkFrame(self.main_frame)
-        self.controls_frame.grid(row=1, column=0, sticky="ew", pady=(0, 20))
+        # Start background API logic
+        self.api_thread = threading.Thread(target=self.api.run, kwargs={"use_stdin": False}, daemon=True)
+        self.api_thread.start()
+
+    def init_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # Status Label
+        self.status_label = QLabel("Status: Unknown")
+        font = QFont()
+        font.setPointSize(16)
+        font.setBold(True)
+        self.status_label.setFont(font)
+        self.status_label.setStyleSheet("color: gray;")
+        main_layout.addWidget(self.status_label)
+
+        # Stats Group
+        stats_group = QGroupBox("Live Connection Stats")
+        stats_layout = QVBoxLayout()
+        self.tx_label = QLabel("TX: 0 B/s")
+        self.rx_label = QLabel("RX: 0 B/s")
+        font_stats = QFont("Consolas", 11)
+        self.tx_label.setFont(font_stats)
+        self.rx_label.setFont(font_stats)
+        stats_layout.addWidget(self.tx_label)
+        stats_layout.addWidget(self.rx_label)
+        stats_group.setLayout(stats_layout)
+        main_layout.addWidget(stats_group)
+
+        # Controls Group
+        controls_group = QGroupBox("Controls")
+        controls_layout = QHBoxLayout()
         
-        self.btn_connect = ctk.CTkButton(self.controls_frame, text="INITIALIZE LINK", command=self.toggle_connection, 
-                                         height=50, font=("Roboto", 16, "bold"), fg_color="forestgreen")
-        self.btn_connect.pack(fill="x", padx=20, pady=10)
+        self.strict_cb = QCheckBox("Strict Mode (Kill Switch)")
+        self.sysproxy_cb = QCheckBox("System-Wide Proxy")
         
-        self.switch_strict = ctk.CTkSwitch(self.controls_frame, text="STRICT MODE (Kill Switch)")
-        self.switch_strict.pack(pady=10)
-
-        self.switch_sysproxy = ctk.CTkSwitch(self.controls_frame, text="SYSTEM-WIDE PROXY (All Apps)")
-        self.switch_sysproxy.pack(pady=10)
-
-        # Logs
-        self.log_box = ctk.CTkTextbox(self.main_frame, font=("Consolas", 12), text_color="#00ff41", fg_color="black")
-        self.log_box.grid(row=2, column=0, sticky="nsew")
-        self.log("System Initialized.")
-
-        # Polling
-        self.after(100, self.update_ui)
-
-    def log(self, msg):
-        timestamp = time.strftime("[%H:%M:%S]")
-        self.log_box.insert("end", f"{timestamp} {msg}\n")
-        self.log_box.see("end")
-
-    def toggle_connection(self):
-        if not self.running:
-            self.start_services()
-        else:
-            self.stop_services()
-
-    def start_services(self):
-        self.running = True
-        self.btn_connect.configure(text="TERMINATE LINK", fg_color="darkred")
-        self.status_indicator.configure(text="SECURE CONNECTION ACTIVE", text_color="#00ff41")
-        self.log("Starting ShadowLink Services...")
+        self.start_btn = QPushButton("Start Tunnel")
+        self.start_btn.clicked.connect(self.start_api)
+        self.start_btn.setStyleSheet("background-color: #2e8b57; color: white; font-weight: bold; padding: 6px;")
         
-        # Start Threads
-        strict = self.switch_strict.get() == 1
-        sysproxy_on = self.switch_sysproxy.get() == 1
-        
-        self.server_thread = threading.Thread(target=self.run_server, args=(strict,), daemon=True)
-        self.client_thread = threading.Thread(target=self.run_client, daemon=True)
-        
-        self.server_thread.start()
-        self.client_thread.start()
-        
-        # Enable System Proxy if requested
-        if sysproxy_on:
-             from sysproxy import SystemProxyManager
-             if SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, True):
-                 self.log("System-Wide Proxy ENABLED")
-             else:
-                 self.log("ERROR: Could not set System Proxy")
+        self.stop_btn = QPushButton("Stop Tunnel")
+        self.stop_btn.clicked.connect(self.stop_api)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet("background-color: #cd5c5c; color: white; font-weight: bold; padding: 6px;")
 
-    def stop_services(self):
-        # Graceful shutdown is hard with asyncio.run in threads without complex signaling
-        # For this PoC, we rely on daemon threads dying when app closes or just "abandoning" them
-        # Ideally, we'd use a stop event.
-        self.running = False
-        
-        # Disable System Proxy always on stop
-        from sysproxy import SystemProxyManager
-        SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, False)
-        self.log("System-Wide Proxy DISABLED")
-        
-        self.btn_connect.configure(text="INITIALIZE LINK", fg_color="forestgreen")
-        self.status_indicator.configure(text="OFFLINE", text_color="red")
-        self.log("Stopping Services (Restart App to fully reset threads)")
-        # In a real app we would cancel async tasks here.
+        controls_layout.addWidget(self.strict_cb)
+        controls_layout.addWidget(self.sysproxy_cb)
+        controls_layout.addWidget(self.start_btn)
+        controls_layout.addWidget(self.stop_btn)
+        controls_group.setLayout(controls_layout)
+        main_layout.addWidget(controls_group)
 
-    def run_server(self, strict):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Hardcode ISP Safe IP for now or fetch it
-        # For simplicity, if strict is on, we assume the user configured Config.ISP_IP manually or we fetch it first?
-        # Let's verify strict mode logic.
-        server = ShadowServer(strict_mode=strict, safe_isp_ip=Config.ISP_IP_MARKER)
-        self.log(f"Server Host initialized (Strict: {strict})")
-        loop.run_until_complete(server.start())
+        # Log Window
+        log_group = QGroupBox("System Logs")
+        log_layout = QVBoxLayout()
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setFont(QFont("Consolas", 9))
+        log_layout.addWidget(self.log_output)
+        log_group.setLayout(log_layout)
+        main_layout.addWidget(log_group)
 
-    def run_client(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        client = ShadowClient(stats_queue=self.stats_queue)
-        self.log("Client Proxy initialized on :1080")
-        loop.run_until_complete(client.start())
+    def api_callback(self, event_type, data):
+        if event_type == "log":
+            self.signals.log_signal.emit(data.get("message", ""))
+        elif event_type == "status":
+            self.signals.status_signal.emit(data.get("state", "unknown"))
+        elif event_type == "stats":
+            self.signals.stats_signal.emit(data)
 
-    def update_ui(self):
-        # Process Stats
-        while not self.stats_queue.empty():
-            stat = self.stats_queue.get()
-            # Smooth out speed display?
-            # stat['speed_sent'] is chunk size. We need to aggregate per second.
-            # Simplified: Just show total for now or "Activity"
-            self.lbl_speed_up.configure(text=f"UPLOAD: {stat['sent']//1024} KB")
-            self.lbl_speed_down.configure(text=f"DOWNLOAD: {stat['recv']//1024} KB")
+    @pyqtSlot(str)
+    def on_log(self, msg):
+        self.log_output.append(f"> {msg}")
 
-        self.after(100, self.update_ui)
+    @pyqtSlot(str)
+    def on_status(self, state):
+        self.status_label.setText(f"Status: {state.capitalize()}")
+        if state == "running":
+            self.status_label.setStyleSheet("color: #2e8b57;") # SeaGreen
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+            self.strict_cb.setEnabled(False)
+            self.sysproxy_cb.setEnabled(False)
+        elif state == "stopped" or state == "ready":
+            self.status_label.setStyleSheet("color: gray;")
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.strict_cb.setEnabled(True)
+            self.sysproxy_cb.setEnabled(True)
+            self.tx_label.setText("TX: 0 B/s")
+            self.rx_label.setText("RX: 0 B/s")
+        elif state == "starting" or state == "stopping":
+            self.status_label.setStyleSheet("color: #daa520;") # GoldenRod
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+
+    @pyqtSlot(dict)
+    def on_stats(self, stats):
+        tx = stats.get("bytes_sent", 0)
+        rx = stats.get("bytes_received", 0)
+        self.tx_label.setText(f"TX: {self.format_bytes(tx)}/s")
+        self.rx_label.setText(f"RX: {self.format_bytes(rx)}/s")
+
+    def format_bytes(self, size):
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} PB"
+
+    def start_api(self):
+        strict = self.strict_cb.isChecked()
+        sysproxy = self.sysproxy_cb.isChecked()
+        self.api.start_services(strict=strict, sysproxy_on=sysproxy)
+
+    def stop_api(self):
+        self.api.stop_services()
+
+    def closeEvent(self, event):
+        self.api.stop_services()
+        event.accept()
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion") # Cleaner native-like cross-platform look
+    gui = ShadowLinkGUI()
+    gui.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    app = ShadowLinkApp()
-    app.mainloop()
+    main()

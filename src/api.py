@@ -22,19 +22,23 @@ except ImportError:
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ShadowAPI:
-    def __init__(self):
+    def __init__(self, event_callback=None):
         self.running = False
         self.stats_queue = Queue()
         self.server_thread = None
         self.client_thread = None
         self.loop_server = None
         self.loop_client = None
+        self.event_callback = event_callback
 
     def send_event(self, event_type, data):
-        """Send JSON event to Electron via stdout"""
-        msg = json.dumps({"type": event_type, "data": data})
-        sys.stdout.write(msg + "\n")
-        sys.stdout.flush()
+        """Send JSON event to Electron via stdout or direct callback"""
+        if self.event_callback:
+            self.event_callback(event_type, data)
+        else:
+            msg = json.dumps({"type": event_type, "data": data})
+            sys.stdout.write(msg + "\n")
+            sys.stdout.flush()
 
     def start_services(self, strict=False, sysproxy_on=False):
         if self.running:
@@ -122,30 +126,16 @@ class ShadowAPI:
             except Empty:
                 break
 
-    def run(self):
+    def run(self, use_stdin=True):
         self.send_event("status", {"state": "ready"})
         
         # Main loop: Read stdin, process commands, flush stats
-        while True:
-            # Non-blocking read trick or just blocking read line by line?
-            # Since we need to push stats, blocking read on stdin might block stats.
-            # We can use a thread for stdin reading or use select (but windows select on stdin is tricky).
-            # Simplest for Windows/Cross-platform here: Use a thread to read stdin and put into a queue,
-            # and main loop processes that queue + stats.
-            
-            # Actually, standard input reading in Python on Windows can be blocking.
-            # Let's use a separate thread for input reading.
-            
-            # For simplicity in this initial version, let's just use a select-like approach 
-            # or actually, just run the stats reporter in a separate thread?
-            # No, let's keep main thread for coordination.
-            
-            # Let's start an input reader thread.
+        if use_stdin:
             threading.Thread(target=self.input_loop, daemon=True).start()
             
-            while True:
-                self.process_stats()
-                time.sleep(0.5) # Update rate
+        while True:
+            self.process_stats()
+            time.sleep(0.5) # Update rate
 
     def input_loop(self):
         for line in sys.stdin:
