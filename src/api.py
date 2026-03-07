@@ -80,7 +80,10 @@ class ShadowAPI:
         # Threads are daemons, they will die when we exit or we can leave them 
         # hanging if we plan to restart. For API, usually we just restart the process 
         # or we need complex cancellation logic.
-        # For now, we update state.
+        if hasattr(self, 'server_instance') and self.server_instance:
+            self.server_instance.stop()
+        if hasattr(self, 'client_instance') and self.client_instance:
+            self.client_instance.stop()
         
         self.send_event("status", {"state": "stopped"})
 
@@ -90,11 +93,9 @@ class ShadowAPI:
         self.loop_server = loop
         
         try:
-            # Check port first or just try to start? 
-            # asyncio start() usually binds port.
-            server = ShadowServer(strict_mode=strict, safe_isp_ip=Config.ISP_IP_MARKER)
+            self.server_instance = ShadowServer(strict_mode=strict, safe_isp_ip=Config.ISP_IP_MARKER)
             self.send_event("log", {"message": f"Server Host initialized (Strict: {strict})"})
-            loop.run_until_complete(server.start())
+            loop.run_until_complete(self.server_instance.start())
         except Exception as e:
             logging.error(f"Server error: {e}")
             self.send_event("log", {"message": f"Server Error: {str(e)}"})
@@ -108,10 +109,10 @@ class ShadowAPI:
         asyncio.set_event_loop(loop)
         self.loop_client = loop
         
-        client = ShadowClient(stats_queue=self.stats_queue)
+        self.client_instance = ShadowClient(stats_queue=self.stats_queue)
         self.send_event("log", {"message": "Client Proxy initialized"})
         try:
-            loop.run_until_complete(client.start())
+            loop.run_until_complete(self.client_instance.start())
         except Exception as e:
             logging.error(f"Client error: {e}")
             self.send_event("log", {"message": f"Client Error: {str(e)}"})

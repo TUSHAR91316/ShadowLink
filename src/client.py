@@ -31,32 +31,71 @@ class ShadowClient:
 
     async def handle_browser(self, reader, writer):
         try:
-            # --- SOCKS5 HANDSHAKE ---
-            # 1. Auth negotiation
+            # --- PROTOCOL NEGOTIATION ---
             header = await reader.read(2)
-            if not header or header[0] != 0x05: return
-            nmethods = header[1]
-            await reader.read(nmethods)
-            writer.write(b'\x05\x00') # No Auth
-            await writer.drain()
+            if not header: return
 
-            # 2. Connection Request
-            request_header = await reader.read(4)
-            if not request_header: return
-            ver, cmd, rsv, atyp = request_header
-            if cmd != 0x01: return # Connect only
+            # **HTTP Proxy Fallback (For browsers that ignore SOCKS settings)**
+            if header.startswith(b'CO') or header.startswith(b'GE') or header.startswith(b'PO'):
+                # Read the rest of the HTTP headers to find the Host
+                request_line_rest = await reader.readuntil(b'\r\n')
+                full_req_line = header + request_line_rest
+                
+                parts = full_req_line.decode().split(' ')
+                if len(parts) >= 2:
+                    url = parts[1]
+                    if url.startswith('http'):
+                        from urllib.parse import urlparse
+                        parsedUrl = urlparse(url)
+                        dst_addr = parsedUrl.hostname
+                        dst_port = parsedUrl.port or (443 if parsedUrl.scheme == 'https' else 80)
+                    else:
+                        # CONNECT format (host:port)
+                        host_port = url.split(':')
+                        dst_addr = host_port[0]
+                        dst_port = int(host_port[1]) if len(host_port) > 1 else 443
+                        
+                    # Consume remaining headers
+                    while True:
+                        line = await reader.readuntil(b'\r\n')
+                        if line == b'\r\n': break
+                        
+                    # HTTP CONNECT Success Response
+                    writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    await writer.drain()
+                else: return
 
-            if atyp == 0x01: # IPv4
-                addr_bytes = await reader.read(4)
-                dst_addr = socket.inet_ntoa(addr_bytes)
-            elif atyp == 0x03: # Domain
-                len_byte = await reader.read(1)
-                domain_len = len_byte[0]
-                dst_addr = (await reader.read(domain_len)).decode()
-            else: return # IPv6 bad
+            # **SOCKS5 Protocol**
+            elif header[0] == 0x05:
+                nmethods = header[1]
+                await reader.read(nmethods)
+                writer.write(b'\x05\x00') # No Auth
+                await writer.drain()
 
-            port_bytes = await reader.read(2)
-            dst_port = int.from_bytes(port_bytes, 'big')
+                # 2. Connection Request
+                request_header = await reader.read(4)
+                if not request_header: return
+                ver, cmd, rsv, atyp = request_header
+                if cmd != 0x01: return # Connect only
+
+                if atyp == 0x01: # IPv4
+                    addr_bytes = await reader.read(4)
+                    dst_addr = socket.inet_ntoa(addr_bytes)
+                elif atyp == 0x03: # Domain
+                    len_byte = await reader.read(1)
+                    domain_len = len_byte[0]
+                    dst_addr = (await reader.read(domain_len)).decode()
+                else: return # IPv6 bad
+
+                port_bytes = await reader.read(2)
+                dst_port = int.from_bytes(port_bytes, 'big')
+                
+                # Flag for replying via SOCKS protocol
+                is_socks = True
+            else:
+                return # Unsupported protocol
+
+            logging.info(f"Connecting to {dst_addr}:{dst_port}")
 
             logging.info(f"Connecting to {dst_addr}:{dst_port}")
 
@@ -111,8 +150,9 @@ class ShadowClient:
                 return
 
             # Reply to Browser (Success)
-            writer.write(b'\x05\x00\x00\x01' + socket.inet_aton('0.0.0.0') + (0).to_bytes(2, 'big'))
-            await writer.drain()
+            if 'is_socks' in locals() and is_socks:
+                writer.write(b'\x05\x00\x00\x01' + socket.inet_aton('0.0.0.0') + (0).to_bytes(2, 'big'))
+                await writer.drain()
 
             # --- PIPE DATA ---
             await asyncio.gather(
@@ -154,11 +194,16 @@ class ShadowClient:
         except: pass
 
     async def start(self):
-        server = await asyncio.start_server(
+        self.server = await asyncio.start_server(
             self.handle_browser, '127.0.0.1', Config.CLIENT_PORT)
         logging.info(f"SOCKS5 Proxy on localhost:{Config.CLIENT_PORT}")
-        async with server:
-            await server.serve_forever()
+        async with self.server:
+            await self.server.serve_forever()
+
+    def stop(self):
+        if hasattr(self, 'server') and self.server:
+            self.server.close()
+            logging.info("SOCKS5 Proxy stopped.")
 
 if __name__ == '__main__':
     client = ShadowClient()

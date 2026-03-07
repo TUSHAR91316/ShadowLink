@@ -139,14 +139,19 @@ class ShadowServer:
         except: pass
 
     async def start(self):
-        server = await asyncio.start_server(
+        self.server = await asyncio.start_server(
             self.handle_client, '0.0.0.0', Config.SERVER_PORT)
         
         logging.info(f"ShadowLink Server running on 0.0.0.0:{Config.SERVER_PORT}")
         logging.info(f"Strict Mode: {self.strict_mode}")
         
-        async with server:
-            await server.serve_forever()
+        async with self.server:
+            await self.server.serve_forever()
+
+    def stop(self):
+        if hasattr(self, 'server') and self.server:
+            self.server.close()
+            logging.info("ShadowLink Server stopped.")
 
 if __name__ == '__main__':
     # For testing, strictly relying on args would be better, but default is OFF

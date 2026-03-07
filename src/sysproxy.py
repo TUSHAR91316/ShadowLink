@@ -22,7 +22,7 @@ class SystemProxyManager:
             key = SystemProxyManager.INTERNET_SETTINGS
             
             if enabled:
-                proxy_server = f"socks={host}:{port}"
+                proxy_server = f"socks5://{host}:{port}"
                 # Enable Proxy
                 winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 1)
                 # Set Proxy Server
