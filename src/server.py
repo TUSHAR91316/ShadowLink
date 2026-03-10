@@ -3,6 +3,11 @@ import logging
 import urllib.request
 from config import Config
 from encryption import TunnelEncryption, ECDHKeyExchange
+import sys
+import os
+import socket
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from udp.server_udp import start_server_udp_relay
 
 logging.basicConfig(level=Config.get_log_level(), format='%(asctime)s - [SERVER] - %(message)s')
 
@@ -44,26 +49,41 @@ class ShadowServer:
             return
 
         try:
-            # 2. Key Exchange (ECDH)
+            # --- DPI OBFUSCATION HANDSHAKE & ECDH ---
+            
+            # DPI BYPASS: Read Fake HTTP Request
+            req_line = await reader.readuntil(b'\r\n\r\n')
+            req_str = req_line.decode('utf-8')
+            
+            # Extract client pub key from fake headers
+            client_pub_b64 = ""
+            for line in req_str.split('\r\n'):
+                if line.startswith("X-Auth-Key:"):
+                    client_pub_b64 = line.split(":", 1)[1].strip()
+                    break
+                    
+            if not client_pub_b64:
+                logging.error("Invalid obfuscated handshake")
+                writer.close()
+                return
+                
+            import base64
+            client_pub_bytes = base64.b64decode(client_pub_b64)
+
             # Generate our ephemeral key pair
             server_ecdh = ECDHKeyExchange()
             server_pub = server_ecdh.get_public_bytes()
             
-            # Send our public key
-            writer.write(len(server_pub).to_bytes(4, 'big'))
-            writer.write(server_pub)
+            # DPI BYPASS: Send Fake HTTP Response containing our public key
+            server_pub_b64 = base64.b64encode(server_pub).decode('utf-8')
+            fake_resp = f"HTTP/1.1 200 OK\r\nServer: Microsoft-IIS/10.0\r\nX-Server-Key: {server_pub_b64}\r\n\r\n"
+            writer.write(fake_resp.encode())
             await writer.drain()
             
-            # Read client's public key
-            len_bytes = await reader.read(4)
-            if not len_bytes: return
-            client_pub_len = int.from_bytes(len_bytes, 'big')
-            client_pub_bytes = await reader.read(client_pub_len)
-            
-            # Derive shared session key (AES-256)
+            # Derive shared session key
             shared_key = server_ecdh.derive_shared_key(client_pub_bytes)
             cipher = TunnelEncryption(shared_key)
-            logging.info(f"Secure Tunnel Established with {addr} (AES-256)")
+            logging.info(f"Secure WireGuard Tunnel Established with {addr} (Obfuscated)")
 
             # 3. Handle Encrypted Traffic
             # We expect the first message to be the Target Host info
@@ -71,38 +91,108 @@ class ShadowServer:
             # Encrypted Data Decrypts to: "HOST:PORT"
             
             # Read encrypted target info
-            len_bytes = await reader.read(4)
-            if not len_bytes: return
-            enc_len = int.from_bytes(len_bytes, 'big')
-            encrypted_data = await reader.read(enc_len)
+            masked_len_bytes = await reader.readexactly(4)
+            raw_len_bytes = bytes(b ^ 0x6A for b in masked_len_bytes)
+            enc_len = int.from_bytes(raw_len_bytes, 'big')
+            
+            encrypted_data = await reader.readexactly(enc_len)
             
             target_info_bytes = cipher.decrypt(encrypted_data)
             target_info = target_info_bytes.decode()
             
-            remote_host, remote_port_str = target_info.split(':')
-            remote_port = int(remote_port_str)
-            
-            logging.info(f"Forwarding to {remote_host}:{remote_port}")
-            
-            try:
-                remote_reader, remote_writer = await asyncio.open_connection(remote_host, remote_port)
-            except Exception as e:
-                logging.error(f"Failed to connect to target: {e}")
-                # Send Encrypted Failure? Or just close.
-                writer.close()
-                return
+            if target_info == "UDP:ASSOCIATE":
+                logging.info(f"Target is UDP Association for {addr}")
+                
+                # Start an ephemeral UDP output socket
+                udp_transport, udp_protocol = await start_server_udp_relay(writer, cipher)
+                
+                # Confirm connection to client (Encrypted "OK")
+                encrypted_ok = cipher.encrypt(b"OK")
+                raw_len = len(encrypted_ok).to_bytes(4, 'big')
+                masked_len = bytes(b ^ 0x6A for b in raw_len)
+                writer.write(masked_len)
+                writer.write(encrypted_ok)
+                await writer.drain()
+                
+                # Loop to read incoming securely-tunneled UDP packets from the client over TCP
+                try:
+                    while True:
+                        masked_len_bytes = await reader.readexactly(4)
+                        raw_len_bytes = bytes(b ^ 0x6A for b in masked_len_bytes)
+                        length = int.from_bytes(raw_len_bytes, 'big')
+                        
+                        encrypted = await reader.readexactly(length)
+                        decrypted = cipher.decrypt(encrypted) # This is a SOCKS5 UDP payload
+                        
+                        # SOCKS5 UDP Request Format:
+                        # +----+------+------+----------+----------+----------+
+                        # |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
+                        # +----+------+------+----------+----------+----------+
+                        # | 2  |  1   |  1   | Variable |    2     | Variable |
+                        # +----+------+------+----------+----------+----------+
+                        
+                        if len(decrypted) > 10:
+                            frag = decrypted[2]
+                            if frag != 0: continue # Fragmentation not supported yet
+                            
+                            atyp = decrypted[3]
+                            data_idx = 4
+                            
+                            if atyp == 0x01: # IPv4
+                                dst_addr = socket.inet_ntoa(decrypted[data_idx:data_idx+4])
+                                data_idx += 4
+                            elif atyp == 0x03: # Domain
+                                domain_len = decrypted[data_idx]
+                                data_idx += 1
+                                dst_addr = decrypted[data_idx:data_idx+domain_len].decode('utf-8')
+                                data_idx += domain_len
+                            else: continue # IPv6 / error
+                                
+                            dst_port = int.from_bytes(decrypted[data_idx:data_idx+2], 'big')
+                            data_idx += 2
+                            
+                            payload = decrypted[data_idx:]
+                            
+                            # Send the raw payload to the target on the internet!
+                            udp_transport.sendto(payload, (dst_addr, dst_port))
+                            
+                except asyncio.IncompleteReadError:
+                    pass # Normal disconnect
+                except Exception as e:
+                    logging.error(f"Server UDP Relay Error: {e}")
+                finally:
+                    udp_transport.close()
 
-            # Confirm connection to client (Encrypted "OK")
-            encrypted_ok = cipher.encrypt(b"OK")
-            writer.write(len(encrypted_ok).to_bytes(4, 'big'))
-            writer.write(encrypted_ok)
-            await writer.drain()
+            else:
+                # Normal TCP Connect
+                remote_host, remote_port_str = target_info.split(':')
+                remote_port = int(remote_port_str)
+                
+                logging.info(f"Forwarding TCP to {remote_host}:{remote_port}")
+                
+                try:
+                    remote_reader, remote_writer = await asyncio.open_connection(remote_host, remote_port)
+                except Exception as e:
+                    logging.error(f"Failed to connect to TCP target: {e}")
+                    writer.close()
+                    return
 
-            # Pipe data
-            await asyncio.gather(
-                self.forward_decrypt(reader, remote_writer, cipher),
-                self.forward_encrypt(remote_reader, writer, cipher)
-            )
+                # Confirm connection to client (Encrypted "OK")
+                encrypted_ok = cipher.encrypt(b"OK")
+                
+                # DPI BYPASS: Mask length
+                raw_len = len(encrypted_ok).to_bytes(4, 'big')
+                masked_len = bytes(b ^ 0x6A for b in raw_len)
+                
+                writer.write(masked_len)
+                writer.write(encrypted_ok)
+                await writer.drain()
+
+                # Pipe data
+                await asyncio.gather(
+                    self.forward_decrypt(reader, remote_writer, cipher),
+                    self.forward_encrypt(remote_reader, writer, cipher)
+                )
 
         except Exception as e:
             logging.error(f"Error handling client {addr}: {e}")
@@ -112,16 +202,20 @@ class ShadowServer:
     async def forward_decrypt(self, source, dest, cipher):
         try:
             while True:
-                len_bytes = await source.read(4)
-                if not len_bytes: break
-                length = int.from_bytes(len_bytes, 'big')
-                encrypted = await source.read(length)
-                if not encrypted: break
+                # Use readexactly to fix TCP framing
+                masked_len_bytes = await source.readexactly(4)
+                raw_len_bytes = bytes(b ^ 0x6A for b in masked_len_bytes)
+                length = int.from_bytes(raw_len_bytes, 'big')
+                
+                encrypted = await source.readexactly(length)
                 
                 decrypted = cipher.decrypt(encrypted)
                 dest.write(decrypted)
                 await dest.drain()
-        except: pass
+        except asyncio.IncompleteReadError:
+            pass # Normal disconnect
+        except Exception as e:
+            pass
         finally:
             try: dest.close() 
             except: pass
@@ -133,7 +227,12 @@ class ShadowServer:
                 if not data: break
                 
                 encrypted = cipher.encrypt(data)
-                dest.write(len(encrypted).to_bytes(4, 'big'))
+                
+                # DPI BYPASS: Mask length
+                raw_len = len(encrypted).to_bytes(4, 'big')
+                masked_len = bytes(b ^ 0x6A for b in raw_len)
+                
+                dest.write(masked_len)
                 dest.write(encrypted)
                 await dest.drain()
         except: pass

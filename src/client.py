@@ -4,6 +4,10 @@ import logging
 import time
 from config import Config
 from encryption import TunnelEncryption, ECDHKeyExchange
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from udp.proxy_udp import start_udp_listener
 
 logging.basicConfig(level=Config.get_log_level(), format='%(asctime)s - [CLIENT] - %(message)s')
 
@@ -76,7 +80,9 @@ class ShadowClient:
                 request_header = await reader.read(4)
                 if not request_header: return
                 ver, cmd, rsv, atyp = request_header
-                if cmd != 0x01: return # Connect only
+                
+                if cmd not in (0x01, 0x03): 
+                    return # Connect (0x01) or UDP Associate (0x03) only
 
                 if atyp == 0x01: # IPv4
                     addr_bytes = await reader.read(4)
@@ -99,7 +105,7 @@ class ShadowClient:
 
             logging.info(f"Connecting to {dst_addr}:{dst_port}")
 
-            # --- SERVER CONNECTION & ECDH HANDSHAKE ---
+            # --- SERVER CONNECTION & DPI OBFUSCATION HANDSHAKE ---
             try:
                 srv_reader, srv_writer = await asyncio.open_connection(self.server_host, self.server_port)
             except Exception as e:
@@ -111,35 +117,56 @@ class ShadowClient:
             client_ecdh = ECDHKeyExchange()
             client_pub = client_ecdh.get_public_bytes()
 
-            # 1. Read Server Pub Key
-            len_bytes = await srv_reader.read(4)
-            if not len_bytes: return
-            server_pub_len = int.from_bytes(len_bytes, 'big')
-            server_pub_bytes = await srv_reader.read(server_pub_len)
-
-            # 2. Send Our Pub Key
-            srv_writer.write(len(client_pub).to_bytes(4, 'big'))
-            srv_writer.write(client_pub)
+            # DPI BYPASS: Send Fake HTTP Request containing our public key
+            import base64
+            pub_b64 = base64.b64encode(client_pub).decode('utf-8')
+            fake_req = f"GET / HTTP/1.1\r\nHost: www.microsoft.com\r\nUser-Agent: Mozilla/5.0\r\nX-Auth-Key: {pub_b64}\r\n\r\n"
+            srv_writer.write(fake_req.encode())
             await srv_writer.drain()
+
+            # DPI BYPASS: Read Fake HTTP Response containing server's public key
+            resp_line = await srv_reader.readuntil(b'\r\n\r\n')
+            resp_str = resp_line.decode('utf-8')
+            
+            # Extract server pub key
+            server_pub_b64 = ""
+            for line in resp_str.split('\r\n'):
+                if line.startswith("X-Server-Key:"):
+                    server_pub_b64 = line.split(":", 1)[1].strip()
+                    break
+            
+            if not server_pub_b64:
+                raise Exception("Invalid handshake response")
+
+            server_pub_bytes = base64.b64decode(server_pub_b64)
 
             # 3. Derive Secret
             shared_key = client_ecdh.derive_shared_key(server_pub_bytes)
             cipher = TunnelEncryption(shared_key)
-            logging.info("Encrypted Tunnel Established")
+            logging.info("Encrypted WireGuard Tunnel Established (Obfuscated)")
 
             # --- REQUEST TUNNEL ---
-            connect_msg = f"{dst_addr}:{dst_port}".encode()
+            if cmd == 0x01:
+                connect_msg = f"{dst_addr}:{dst_port}".encode()
+            elif cmd == 0x03:
+                connect_msg = b"UDP:ASSOCIATE"
+                
             encrypted_connect = cipher.encrypt(connect_msg)
             
-            srv_writer.write(len(encrypted_connect).to_bytes(4, 'big'))
+            # DPI BYPASS: Mask the length prefix
+            raw_len = len(encrypted_connect).to_bytes(4, 'big')
+            masked_len = bytes(b ^ 0x6A for b in raw_len) # Simple XOR mask
+            
+            srv_writer.write(masked_len)
             srv_writer.write(encrypted_connect)
             await srv_writer.drain()
 
             # Wait for OK
-            len_bytes = await srv_reader.read(4)
-            if not len_bytes: return
-            enc_len = int.from_bytes(len_bytes, 'big')
-            encrypted_resp = await srv_reader.read(enc_len)
+            masked_len_bytes = await srv_reader.readexactly(4)
+            raw_len_bytes = bytes(b ^ 0x6A for b in masked_len_bytes)
+            enc_len = int.from_bytes(raw_len_bytes, 'big')
+            
+            encrypted_resp = await srv_reader.readexactly(enc_len)
             
             try:
                 decrypted_resp = cipher.decrypt(encrypted_resp)
@@ -151,19 +178,38 @@ class ShadowClient:
 
             # Reply to Browser (Success)
             if 'is_socks' in locals() and is_socks:
-                writer.write(b'\x05\x00\x00\x01' + socket.inet_aton('0.0.0.0') + (0).to_bytes(2, 'big'))
-                await writer.drain()
+                if cmd == 0x01:
+                    writer.write(b'\x05\x00\x00\x01' + socket.inet_aton('0.0.0.0') + (0).to_bytes(2, 'big'))
+                    await writer.drain()
+                elif cmd == 0x03:
+                    # UDP Associate: We must open a UDP socket and tell the client where to send packets
+                    udp_transport, udp_protocol, udp_port = await start_udp_listener(srv_writer, cipher)
+                    
+                    # BND.ADDR and BND.PORT (Local IP and the ephemeral UDP listening port)
+                    writer.write(b'\x05\x00\x00\x01' + socket.inet_aton('127.0.0.1') + udp_port.to_bytes(2, 'big'))
+                    await writer.drain()
 
             # --- PIPE DATA ---
-            await asyncio.gather(
-                self.forward_encrypt(reader, srv_writer, cipher),
-                self.forward_decrypt(srv_reader, writer, cipher)
-            )
+            if cmd == 0x01:
+                await asyncio.gather(
+                    self.forward_encrypt(reader, srv_writer, cipher),
+                    self.forward_decrypt(srv_reader, writer, cipher)
+                )
+            elif cmd == 0x03:
+                # For UDP, the client sends datagrams directly to the UDP port. 
+                # This TCP connection must be held open to keep the association alive.
+                # We also need to read server replies (UDP packets coming back) and push them to the UDP protocol.
+                await asyncio.gather(
+                    self.forward_decrypt_udp(srv_reader, udp_protocol, cipher),
+                    self.hold_tcp_alive(reader)
+                )
 
         except Exception as e:
             logging.error(f"Client Error: {e}")
         finally:
             writer.close()
+            if 'udp_transport' in locals():
+                udp_transport.close()
 
     async def forward_encrypt(self, source, dest, cipher):
         try:
@@ -172,7 +218,12 @@ class ShadowClient:
                 if not data: break
                 
                 encrypted = cipher.encrypt(data)
-                dest.write(len(encrypted).to_bytes(4, 'big'))
+                
+                # DPI BYPASS: Mask length
+                raw_len = len(encrypted).to_bytes(4, 'big')
+                masked_len = bytes(b ^ 0x6A for b in raw_len)
+                
+                dest.write(masked_len)
                 dest.write(encrypted)
                 await dest.drain()
                 self.update_stats(sent=len(data))
@@ -181,16 +232,43 @@ class ShadowClient:
     async def forward_decrypt(self, source, dest, cipher):
         try:
             while True:
-                len_bytes = await source.read(4)
-                if not len_bytes: break
-                length = int.from_bytes(len_bytes, 'big')
-                encrypted = await source.read(length)
-                if not encrypted: break
+                # Use readexactly to fix TCP framing
+                masked_len_bytes = await source.readexactly(4)
+                raw_len_bytes = bytes(b ^ 0x6A for b in masked_len_bytes)
+                length = int.from_bytes(raw_len_bytes, 'big')
+                
+                encrypted = await source.readexactly(length)
                 
                 decrypted = cipher.decrypt(encrypted)
                 dest.write(decrypted)
                 await dest.drain()
                 self.update_stats(received=len(decrypted))
+        except asyncio.IncompleteReadError:
+            pass # Normal disconnect
+        except Exception as e:
+            pass
+
+    async def forward_decrypt_udp(self, source, udp_protocol, cipher):
+        try:
+            while True:
+                masked_len_bytes = await source.readexactly(4)
+                raw_len_bytes = bytes(b ^ 0x6A for b in masked_len_bytes)
+                length = int.from_bytes(raw_len_bytes, 'big')
+                
+                encrypted = await source.readexactly(length)
+                decrypted = cipher.decrypt(encrypted)
+                
+                # Send the decrypted SOCKS5 UDP payload back to the local app
+                udp_protocol.send_to_app(decrypted)
+                self.update_stats(received=len(decrypted))
+        except Exception:
+            pass
+
+    async def hold_tcp_alive(self, reader):
+        try:
+            while True:
+                data = await reader.read(4096)
+                if not data: break # Client dropped association
         except: pass
 
     async def start(self):

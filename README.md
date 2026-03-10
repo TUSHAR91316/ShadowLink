@@ -1,10 +1,11 @@
 # ShadowLink - Secure Local Encrypted Tunnel
 
-ShadowLink is a next-generation local VPN and secure tunnel application that uses **AES-256-GCM** and **X25519** key exchange to encrypt traffic. It comes with both a **Command Line Interface (CLI)** and a **Native GUI** (via PyQt6) for optimal performance and integration.
+ShadowLink is a next-generation local VPN and secure tunnel application that uses **ChaCha20-Poly1305** and **X25519** key exchange (the cryptographic primitives of WireGuard) to encrypt traffic. It comes with both a **Command Line Interface (CLI)** and a **Native GUI** (via PyQt6) for optimal performance and integration.
 
 ## 🚀 Features
 
 - **Double Encryption**: Traffic is encrypted locally using ephemeral keys before leaving your device.
+- **DPI Bypass (Obfuscation)**: Evades Deep Packet Inspection (DPI) on strict university/corporate networks via Fake HTTP handshakes and payload masking.
 - **Strict Mode (Kill Switch)**: Automatically cuts traffic if the secure tunnel drops.
 - **System-Wide Proxy**: Routes all system traffic through the secure tunnel with one click.
 - **Modern UI**: Clean native Windows GUI with real-time stats (PyQt6).
@@ -21,9 +22,9 @@ ShadowLink now uses a fully native Python architecture:
 
 | Feature | Standard SOCKS5 Proxy | ShadowLink |
 | :--- | :--- | :--- |
-| **Encryption** | None (Usually plaintext) | **AES-256-GCM** |
+| **Encryption** | None (Usually plaintext) | **ChaCha20-Poly1305 (WireGuard)** |
 | **Key Management** | Static Password / None | **Ephemeral X25519** (New key per session) |
-| **Purpose** | IP Masking | **Traffic Obfuscation** & Layered Security |
+| **Purpose** | IP Masking | **DPI Obfuscation** & Layered Security |
 | **Dependency** | Remote Server | **Local-Only** (Server runs on your localhost) |
 
 **Why use this locally?** 
@@ -59,7 +60,7 @@ python src/gui.py
 ```
 
 ## 🔐 Verification
-To verify the encryption implementation (X25519 + AES-256-GCM), run the included verification script:
+To verify the encryption implementation (X25519 + ChaCha20-Poly1305), run the included verification script:
 
 ```bash
 python src/verify_encryption.py

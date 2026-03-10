@@ -30,7 +30,7 @@ def main():
     print_hex("Server Public Key", server_pub)
 
     # 2. Derive Shared Secrets
-    print("\n2. Deriving Shared AES-256 Keys...")
+    print("\n2. Deriving Shared ChaCha20-Poly1305 Keys...")
     client_shared = client_auth.derive_shared_key(server_pub)
     server_shared = server_auth.derive_shared_key(client_pub)
     
@@ -52,7 +52,7 @@ def main():
     
     # 4. Encrypt
     encrypted = cipher.encrypt(plaintext)
-    print_hex("Encrypted Packet (Nonce + Ciphertext + Tag)", encrypted)
+    print_hex("Encrypted Packet (Ciphertext + MAC Tag)", encrypted)
     
     # 5. Decrypt (Server side)
     server_cipher = TunnelEncryption(server_shared)
@@ -63,7 +63,7 @@ def main():
     
     if decrypted == plaintext:
         print("\n[VERIFIED] Encryption/Decryption Cycle Successful.")
-        print("Traffic is fully encrypted with AES-256-GCM.")
+        print("Traffic is fully encrypted with WireGuard primitives (ChaCha20-Poly1305).")
     else:
         print("\n[FAILED] Decrypted data does not match original.")
 

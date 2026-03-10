@@ -1,6 +1,12 @@
 import asyncio
 import aiohttp
-from src.config import Config
+import sys
+import os
+
+# Ensure we can import from src
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from config import Config
 
 async def test_proxy():
     proxy_url = f"http://127.0.0.1:{Config.CLIENT_PORT}"
