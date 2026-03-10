@@ -6,6 +6,7 @@ ShadowLink is a next-generation local VPN and secure tunnel application that use
 
 - **Double Encryption**: Traffic is encrypted locally using ephemeral keys before leaving your device.
 - **DPI Bypass (Obfuscation)**: Evades Deep Packet Inspection (DPI) on strict university/corporate networks via Fake HTTP handshakes and payload masking.
+- **Full UDP Support**: Tunnels UDP datagrams (e.g., for VoIP and online gaming) over the secure TCP obfuscation layer via SOCKS5 UDP Associate.
 - **Strict Mode (Kill Switch)**: Automatically cuts traffic if the secure tunnel drops.
 - **System-Wide Proxy**: Routes all system traffic through the secure tunnel with one click.
 - **Modern UI**: Clean native Windows GUI with real-time stats (PyQt6).
@@ -32,9 +33,8 @@ It isolates your application traffic from the rest of the OS until it is fully e
 
 ## ⚠️ Limitations
 
-1.  **TCP Only**: Currently supports SOCKS5 CONNECT method (TCP). UDP (e.g., for gaming/VoIP) is not yet supported.
-2.  **Performance Overhead**: Double encryption (ShadowLink + ProtonVPN) adds a small amount of latency and CPU overhead.
-3.  **Manual Proxy Config**: You must configure your browser/app to use the provided SOCKS5 proxy if not using System-Wide mode.
+1.  **Performance Overhead**: Double encryption (ShadowLink + ProtonVPN) adds a small amount of latency and CPU overhead.
+2.  **Manual Proxy Config**: You must configure your browser/app to use the provided SOCKS5 proxy if not using System-Wide mode.
 
 ## 📦 Installation & Usage
 
