@@ -60,7 +60,7 @@ python src/gui.py
 ```
 
 ## 🔐 Verification
-To verify the encryption implementation (X25519 + ChaCha20-Poly1305), run the included verification script:
+To verify the encryption implementation (X25519 + ChaCha20-Poly1305), run the included verification script
 
 ```bash
 python src/verify_encryption.py
