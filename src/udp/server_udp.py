@@ -23,11 +23,22 @@ class ServerUDPProtocol(asyncio.DatagramProtocol):
         host, port = addr
         
         try:
-            # SOCKS5 Header for IPV4
+            # Ensure host is a raw IPv4 address before calling inet_aton.
+            # UDP datagram addr is always a resolved IP on asyncio, but guard just in case.
+            try:
+                packed_ip = socket.inet_aton(host)
+                atyp = b'\x01'  # IPv4
+            except OSError:
+                # Fallback: encode as domain name (ATYP=0x03)
+                host_bytes = host.encode('utf-8')
+                packed_ip = bytes([len(host_bytes)]) + host_bytes
+                atyp = b'\x03'
+
+            # SOCKS5 Header
             # +----+------+------+----------+----------+----------+
             # |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
             # +----+------+------+----------+----------+----------+
-            header = b'\x00\x00\x00\x01' + socket.inet_aton(host) + port.to_bytes(2, 'big')
+            header = b'\x00\x00\x00' + atyp + packed_ip + port.to_bytes(2, 'big')
             socks_packet = header + data
             
             encrypted = self.cipher.encrypt(socks_packet)

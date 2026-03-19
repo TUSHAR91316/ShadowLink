@@ -39,6 +39,10 @@ class ShadowClient:
             header = await reader.read(2)
             if not header: return
 
+            # Initialize so all code paths have these defined
+            cmd = 0x01  # Default to CONNECT
+            is_socks = False
+
             # **HTTP Proxy Fallback (For browsers that ignore SOCKS settings)**
             if header.startswith(b'CO') or header.startswith(b'GE') or header.startswith(b'PO'):
                 # Read the rest of the HTTP headers to find the Host
@@ -67,6 +71,7 @@ class ShadowClient:
                     # HTTP CONNECT Success Response
                     writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     await writer.drain()
+                    cmd = 0x01  # HTTP proxies only handle CONNECT (TCP)
                 else: return
 
             # **SOCKS5 Protocol**
@@ -100,8 +105,6 @@ class ShadowClient:
                 is_socks = True
             else:
                 return # Unsupported protocol
-
-            logging.info(f"Connecting to {dst_addr}:{dst_port}")
 
             logging.info(f"Connecting to {dst_addr}:{dst_port}")
 

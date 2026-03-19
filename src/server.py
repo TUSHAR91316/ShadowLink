@@ -165,7 +165,7 @@ class ShadowServer:
 
             else:
                 # Normal TCP Connect
-                remote_host, remote_port_str = target_info.split(':')
+                remote_host, remote_port_str = target_info.rsplit(':', 1)
                 remote_port = int(remote_port_str)
                 
                 logging.info(f"Forwarding TCP to {remote_host}:{remote_port}")
