@@ -1,6 +1,6 @@
 # ShadowLink - Secure Local Encrypted Tunnel
 
-ShadowLink is a next-generation local VPN and secure tunnel application that uses **ChaCha20-Poly1305** and **X25519** key exchange (the cryptographic primitives of WireGuard) to encrypt traffic. It comes with both a **Command Line Interface (CLI)** and a **Native GUI** (via PyQt6) for optimal performance and integration.
+ShadowLink is a next-generation local VPN and secure tunnel application that uses **ChaCha20-Poly1305** and **X25519** key exchange (the cryptographic primitives of WireGuard) to encrypt traffic. It comes with both a **Command Line Interface (CLI)** and a **Native GUI** (via PyQt6) for optimal performance and integration
 
 ## 🚀 Features
 
