@@ -33,6 +33,8 @@ class ShadowAPI:
         self.event_callback = event_callback
         self.server_instance = None
         self.client_instance = None
+        self.fallback_mode = False  # Track if system is in fallback mode
+        self.system_proxy_enabled = False  # Track proxy state
 
     def send_event(self, event_type, data):
         """Send JSON event to Electron via stdout or direct callback"""
@@ -76,6 +78,7 @@ class ShadowAPI:
             if sysproxy_on and SystemProxyManager:
                 try:
                     if SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, True):
+                        self.system_proxy_enabled = True
                         self.send_event("log", {"message": "System-Wide Proxy ENABLED"})
                     else:
                         self.send_event("log", {"message": "ERROR: Could not set System Proxy"})
@@ -160,7 +163,12 @@ class ShadowAPI:
         self.loop_server = loop
         
         try:
-            self.server_instance = ShadowServer(strict_mode=strict, safe_isp_ip=Config.ISP_IP_MARKER)
+            # Create server with event callback for fallback notifications
+            self.server_instance = ShadowServer(
+                strict_mode=strict, 
+                safe_isp_ip=Config.ISP_IP_MARKER,
+                event_callback=self._handle_server_event
+            )
             self.send_event("log", {"message": f"Server initialized (Strict Mode: {strict})"})
             logging.info(f"Starting server (strict_mode={strict})")
             loop.run_until_complete(self.server_instance.start())
@@ -177,6 +185,85 @@ class ShadowAPI:
                 loop.close()
             except Exception as e:
                 logging.error(f"Error closing server loop: {e}")
+
+    def _handle_server_event(self, event_type, data):
+        """Handle events from the server (like fallback notifications)."""
+        if event_type == "warning" and data.get("type") == "vpn_failure":
+            # VPN failed - enter fallback mode
+            self._enter_fallback_mode(data)
+        elif event_type == "info" and data.get("type") == "vpn_restored":
+            # VPN restored - exit fallback mode
+            self._exit_fallback_mode(data)
+        elif event_type == "fallback" and data.get("action") == "disable_proxy":
+            # Server requested proxy disable for fallback
+            self._disable_proxy_for_fallback(data)
+        
+        # Forward the event to the UI
+        self.send_event(event_type, data)
+
+    def _enter_fallback_mode(self, data):
+        """Enter fallback mode when VPN fails."""
+        self.fallback_mode = True
+        logging.warning("Entering fallback mode - VPN connection lost")
+        
+        # Send additional UI notification
+        self.send_event("status", {
+            "state": "fallback",
+            "message": "VPN connection lost. Using normal network.",
+            "current_ip": data.get("current_ip")
+        })
+
+    def _exit_fallback_mode(self, data):
+        """Exit fallback mode when VPN is restored."""
+        self.fallback_mode = False
+        logging.info("Exiting fallback mode - VPN connection restored")
+        
+        # Send status update
+        self.send_event("status", {
+            "state": "running",
+            "message": "VPN connection restored. Secure tunnel active."
+        })
+
+    def _disable_proxy_for_fallback(self, data):
+        """Disable system proxy when entering fallback mode."""
+        if SystemProxyManager and self.system_proxy_enabled:
+            try:
+                if SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, False):
+                    self.system_proxy_enabled = False
+                    logging.info("System proxy disabled for fallback mode")
+                    self.send_event("log", {"message": "System proxy disabled - traffic now uses normal network"})
+                else:
+                    logging.error("Failed to disable system proxy for fallback")
+            except Exception as e:
+                logging.error(f"Error disabling proxy for fallback: {e}")
+
+    def retry_connection(self):
+        """Allow user to retry VPN connection after fallback."""
+        if not self.fallback_mode:
+            self.send_event("log", {"message": "Not in fallback mode - no retry needed"})
+            return
+            
+        logging.info("User requested VPN reconnection")
+        self.send_event("log", {"message": "Attempting to reconnect VPN..."})
+        
+        # Force IP cache refresh to check current status
+        if self.server_instance:
+            self.server_instance._cached_public_ip = None
+            self.server_instance._ip_check_time = 0
+            
+        # Check if VPN is back
+        if self.server_instance and self.server_instance.check_safety():
+            self.send_event("log", {"message": "VPN connection restored!"})
+            # Re-enable system proxy if it was enabled before
+            if SystemProxyManager:
+                try:
+                    SystemProxyManager.set_system_proxy('127.0.0.1', Config.CLIENT_PORT, True)
+                    self.system_proxy_enabled = True
+                    self.send_event("log", {"message": "System proxy re-enabled"})
+                except Exception as e:
+                    logging.error(f"Failed to re-enable system proxy: {e}")
+        else:
+            self.send_event("log", {"message": "VPN still not available. Check your VPN connection."})
 
     def run_client(self):
         """Run the client in a dedicated thread with proper event loop."""

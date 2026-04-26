@@ -19,11 +19,14 @@ READ_TIMEOUT = 30.0  # 30 second timeout for read operations
 IP_CACHE_DURATION = 300  # Cache public IP for 5 minutes
 
 class ShadowServer:
-    def __init__(self, strict_mode=False, safe_isp_ip=None):
+    def __init__(self, strict_mode=False, safe_isp_ip=None, event_callback=None):
         self.strict_mode = strict_mode
         self.safe_isp_ip = safe_isp_ip
+        self.event_callback = event_callback
         self._cached_public_ip = None
         self._ip_check_time = 0
+        self.fallback_mode = False  # Track if we're in fallback mode
+        self.last_fallback_time = 0  # Prevent spam warnings
 
     def get_public_ip(self):
         """Get public IP with caching to avoid repeated lookups."""
@@ -60,10 +63,56 @@ class ShadowServer:
             return False
             
         if current_ip == self.safe_isp_ip:
-            logging.critical(f"SECURITY ALERT: VPN DOWN! Current IP ({current_ip}) matches ISP IP. Blocking traffic.")
+            # VPN is down - trigger fallback mode
+            self._trigger_fallback(current_ip)
             return False
         
+        # If we were in fallback mode but VPN is back up, notify user
+        if self.fallback_mode:
+            self._notify_vpn_restored()
+        
         return True
+
+    def _trigger_fallback(self, current_ip):
+        """Trigger fallback to normal network when VPN fails."""
+        current_time = time.time()
+        
+        # Prevent spam warnings (only warn once per minute)
+        if current_time - self.last_fallback_time < 60:
+            return
+            
+        self.last_fallback_time = current_time
+        self.fallback_mode = True
+        
+        logging.critical(f"SECURITY ALERT: VPN DOWN! Current IP ({current_ip}) matches ISP IP. Switching to fallback mode.")
+        
+        # Send warning to UI
+        if self.event_callback:
+            self.event_callback("warning", {
+                "type": "vpn_failure",
+                "message": f"VPN connection lost! Traffic is now using normal network (IP: {current_ip}).",
+                "current_ip": current_ip,
+                "fallback_active": True
+            })
+            
+            # Trigger system proxy disable for fallback
+            self.event_callback("fallback", {
+                "action": "disable_proxy",
+                "reason": "vpn_down",
+                "message": "Disabling system proxy to allow direct internet access"
+            })
+
+    def _notify_vpn_restored(self):
+        """Notify when VPN connection is restored."""
+        self.fallback_mode = False
+        logging.info("VPN connection restored - exiting fallback mode")
+        
+        if self.event_callback:
+            self.event_callback("info", {
+                "type": "vpn_restored", 
+                "message": "VPN connection restored! Secure tunnel is active again.",
+                "fallback_active": False
+            })
 
     async def _read_with_timeout(self, reader, n_bytes):
         """Read n bytes with timeout protection."""
