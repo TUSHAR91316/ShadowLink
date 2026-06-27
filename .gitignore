@@ -25,3 +25,6 @@ electron/build/
 # Misc
 *.log
 *.bak
+workflow.md
+chat.md
+agent.md

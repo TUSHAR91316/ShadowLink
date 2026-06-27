@@ -1,0 +1,6 @@
+cryptography
+customtkinter
+packaging
+darkdetect
+pyinstaller
+PyQt6>=6.0.0
