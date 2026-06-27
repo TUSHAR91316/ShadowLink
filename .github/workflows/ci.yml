@@ -1,0 +1,55 @@
+name: ShadowLink CI & Security Scan
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Check Formatting
+        run: if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then echo "Code is not formatted properly. Run 'go fmt ./...'"; exit 1; fi
+        
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v -race ./...
+
+  security-scan:
+    name: Code Security & Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: ./...
+
+      - name: Setup Go for Govulncheck
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Install Govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run Govulncheck (Dependency vulnerabilities)
+        run: govulncheck ./...

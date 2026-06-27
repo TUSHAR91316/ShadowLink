@@ -18,6 +18,26 @@ electron/resources/*.exe
 electron/release/
 electron/build/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Node
+node_modules/
+npm-debug.log
+
+# Electron Build
+electron/out/
+electron/dist/
+electron/dist_installer/
+electron/resources/*.exe
+electron/release/
+electron/build/
+
 # IDE
 .vscode/
 .idea/
@@ -25,6 +45,8 @@ electron/build/
 # Misc
 *.log
 *.bak
-workflow.md
-chat.md
-agent.md
+.ai/
+
+# Go Binaries
+shadowlink
+shadowlink.exe
