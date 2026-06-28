@@ -4,12 +4,16 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/shadowlink/core/internal/discovery"
+	"github.com/shadowlink/core/internal/network"
+	"github.com/shadowlink/core/internal/socks5"
 	"github.com/shadowlink/core/internal/sysproxy"
+	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 )
 
 func main() {
@@ -31,17 +35,36 @@ func main() {
 		log.Fatalf("Failed to initialize discovery service: %v", err)
 	}
 
-	// Announce role to the DHT
+	// Announce role to the DHT and setup stream handlers
 	if *role == "exit" || *role == "relay" {
 		err := ds.Announce(ctx, "shadowlink-"+*role)
 		if err != nil {
 			log.Fatalf("Failed to announce role: %v", err)
 		}
+		
+		ds.Host.SetStreamHandler(network.ProtocolID, func(s libp2pnet.Stream) {
+			network.HandleStream(s, *role)
+		})
 	}
 
 	// If entry node, set up local SOCKS5 proxy
 	if *role == "entry" {
 		log.Printf("Starting local SOCKS5 proxy on port %d", *socksPort)
+
+		dialer := func(ctx context.Context, netwk, addr string) (net.Conn, error) {
+			return network.DialCircuit(ctx, ds, netwk, addr)
+		}
+
+		proxy, err := socks5.NewServer(*socksPort, dialer)
+		if err != nil {
+			log.Fatalf("Failed to initialize SOCKS5 proxy: %v", err)
+		}
+		
+		go func() {
+			if err := proxy.ListenAndServe(ctx); err != nil {
+				log.Fatalf("SOCKS5 proxy stopped: %v", err)
+			}
+		}()
 		
 		if *setProxy {
 			log.Println("Setting system proxy...")
