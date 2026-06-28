@@ -23,7 +23,7 @@ func StartEntryNode(socksPort int) (*MobileNode, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Use port 0 to let the mobile OS dynamically assign a free networking port
-	ds, err := discovery.NewDiscoveryService(ctx, 0)
+	ds, err := discovery.NewDiscoveryService(ctx, 0, nil)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to initialize discovery: %v", err)
