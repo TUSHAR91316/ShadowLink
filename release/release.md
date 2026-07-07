@@ -2,6 +2,8 @@
 
 Welcome to the new era of ShadowLink! This release completely transitions the network from the legacy Python architecture to an insanely fast, memory-safe Go core featuring native Decentralized VPN capabilities.
 
+> **LEGAL DISCLAIMER:** By downloading or executing any of these binaries, you legally bind yourself to the [TERMS_AND_CONDITIONS.md](../TERMS_AND_CONDITIONS.md). The developers assume absolutely zero liability for your actions. Running an Exit Node exposes your IP address to third-party traffic; you do so entirely at your own personal and legal risk.
+
 ## Cross-Platform Binaries
 Included in this folder are statically linked, zero-dependency binaries for all major operating systems:
 

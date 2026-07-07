@@ -4,6 +4,8 @@
 [![Go](https://img.shields.io/badge/go-1.21+-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+> **LEGAL DISCLAIMER:** ShadowLink is a decentralized, peer-to-peer open-source protocol. The developers operate **no infrastructure**, have **no control** over the network, and assume **zero liability** for any damages or legal repercussions caused by end-users. By downloading or using this software, you agree to the strict terms outlined in the [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md). You assume 100% of the legal risk.
+
 ShadowLink is a next-generation **Decentralized VPN (dVPN)** built in Go. Moving away from traditional client-server architectures, ShadowLink utilizes **Multi-hop Onion Routing** and a **Distributed Hash Table (DHT)** to provide a completely serverless, highly secure, and untraceable network tunnel. 
 
 ## 🚀 Key Features
