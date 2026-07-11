@@ -61,6 +61,8 @@ class DaemonService {
       _process!.stdout.listen((data) {
         final line = String.fromCharCodes(data);
         logNotifier.value += line;
+        
+        // Optimize status detection to be faster and support concurrent roles
         if (line.contains("Starting local SOCKS5 proxy") || line.contains("Announce")) {
            statusNotifier.value = DaemonStatus.connected;
         }
@@ -83,12 +85,23 @@ class DaemonService {
     }
   }
 
-  void stopDaemon() {
+  Future<void> stopDaemon() async {
     if (_process != null) {
       logNotifier.value += "\nStopping daemon...";
       _process!.kill();
       _process = null;
       statusNotifier.value = DaemonStatus.disconnected;
+
+      // Failsafe: Windows Process.kill() is a hard terminate and skips Go defers.
+      // We manually execute the proxy reset flag to guarantee internet is restored.
+      if (Platform.isWindows && isEntry) {
+        try {
+          await Process.run(_getBinaryPath(), ['--reset-proxy']);
+          logNotifier.value += "\nSystem proxy restored successfully.";
+        } catch (e) {
+          logNotifier.value += "\nFailed to restore proxy: $e";
+        }
+      }
     }
   }
 }

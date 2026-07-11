@@ -26,7 +26,13 @@ func main() {
 	isRelay := flag.Bool("relay", false, "Run as a relay node")
 	isExit := flag.Bool("exit", false, "Run as an exit node")
 	setProxy := flag.Bool("sysproxy", false, "Set system proxy on Windows")
+	resetProxy := flag.Bool("reset-proxy", false, "Reset system proxy and exit")
 	flag.Parse()
+
+	if *resetProxy {
+		sysproxy.Disable()
+		return
+	}
 
 	if !*isEntry && !*isRelay && !*isExit {
 		log.Println("No roles specified. Defaulting to --entry")
@@ -107,7 +113,9 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	log.Println("Shutting down ShadowLink...")
+	log.Println("Shutting down ShadowLink gracefully...")
+	cancel() // Cancel all active dials and contexts
+	ds.Host.Close() // Immediately free the libp2p port binding
 }
 
 func checkEULA() {

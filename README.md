@@ -44,25 +44,32 @@ go build -o shadowlink
 
 ### 2. Run ShadowLink
 
-ShadowLink operates as a unified node. You can run it in different roles using command-line flags.
+ShadowLink operates as a unified node. You can run it in different roles concurrently using command-line flags.
 
 **Start an Entry Node (Client) with System Proxy:**
 ```bash
-./shadowlink --role entry --socks 1080 --sysproxy
+./shadowlink --entry --socks 1080 --sysproxy
 ```
 *This starts a local SOCKS5 server on port 1080 and configures your OS to route traffic through it.*
 
 **Start a Relay Node:**
 ```bash
-./shadowlink --role relay --port 9001
+./shadowlink --relay --port 9001
 ```
 
 **Start an Exit Node:**
 ```bash
-./shadowlink --role exit --port 9002
+./shadowlink --exit --port 9002
+```
+
+**Run Concurrent Roles:**
+```bash
+./shadowlink --entry --relay --port 9000
 ```
 
 ## 🏗️ Architecture Migration (v1.x -> v2.x)
+
+For a complete breakdown of the new Flutter + Go architecture and how the system components interact, please refer to the [ARCHITECTURE.md](ARCHITECTURE.md) diagram.
 
 ShadowLink has been completely rewritten from Python to **Go**. 
 - **Legacy Code**: The old Python Client-Server architecture (v1) has been archived in the `legacy_python/` directory.
