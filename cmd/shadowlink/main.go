@@ -47,7 +47,15 @@ func main() {
 	log.Printf("Starting ShadowLink node (Entry: %v, Relay: %v, Exit: %v)", *isEntry, *isRelay, *isExit)
 
 	// Initialize Discovery Service (DHT)
-	bootstrapNodes := []string{} // E.g., "/ip4/1.2.3.4/tcp/9000/p2p/Qm..."
+	// Bootstrap nodes are well-known libp2p peers used to seed the DHT.
+	// Without these, a fresh node cannot discover any peers.
+	bootstrapNodes := []string{
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+		"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
+	}
 	ds, err := discovery.NewDiscoveryService(ctx, *port, bootstrapNodes)
 	if err != nil {
 		log.Fatalf("Failed to initialize discovery service: %v", err)
@@ -65,15 +73,19 @@ func main() {
 				log.Printf("Failed to announce exit role: %v", err)
 			}
 		}
-		
+
+		// I-3 / Bug 4 Fix: Pass the discovery service into the handler so relay
+		// nodes can query the DHT to find exit nodes for 3-hop circuit building.
 		ds.Host.SetStreamHandler(network.ProtocolID, func(s libp2pnet.Stream) {
 			role := "relay"
 			if *isExit {
 				role = "exit"
 			}
-			network.HandleStream(s, role)
+			// Each stream is handled in its own goroutine — already managed by libp2p
+			network.HandleStream(s, role, ds)
 		})
 	}
+
 
 	// If entry node, set up local SOCKS5 proxy
 	if *isEntry {
@@ -99,10 +111,12 @@ func main() {
 			if err := sysproxy.EnableSOCKS5("127.0.0.1", *socksPort); err != nil {
 				log.Printf("Warning: Failed to set system proxy: %v", err)
 			} else {
-				// Ensure proxy is disabled on exit
+				// Bug 5 Fix: Ensure proxy is disabled on exit and log any cleanup error.
 				defer func() {
 					log.Println("Disabling system proxy...")
-					sysproxy.Disable()
+					if err := sysproxy.Disable(); err != nil {
+						log.Printf("Warning: Failed to disable system proxy: %v", err)
+					}
 				}()
 			}
 		}

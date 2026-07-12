@@ -1,77 +1,125 @@
-# ShadowLink Architecture
+# ShadowLink Architecture (Technical Deep-Dive)
 
-ShadowLink operates as a decentralized, peer-to-peer Virtual Private Network. It utilizes **Multi-hop Onion Routing** for extreme privacy and a **Kademlia Distributed Hash Table (DHT)** for serverless node discovery.
+> **Note**: For the high-level overview, see [ARCHITECTURE.md](../ARCHITECTURE.md).
+> This document covers the internals used for developer reference.
 
-## 1. High-Level Network Topology
+---
 
-The network consists of unified Nodes that can act in three capacities:
-- **Entry Node (Client)**: Exposes a local SOCKS5 proxy to the user's OS and routes traffic into the dVPN.
-- **Relay Node**: Receives encrypted traffic from one node and blindly forwards it to the next.
-- **Exit Node**: Decrypts the final layer of traffic and forwards the raw TCP/UDP request to the public internet.
+## Packet Lifecycle — Entry to Internet
 
-```mermaid
-graph LR
-    User[User App/Browser] -->|SOCKS5 Plaintext| Entry[Entry Node]
-    Entry -->|Encrypted Layer 3| Relay1[Relay Node]
-    Relay1 -->|Encrypted Layer 2| Relay2[Relay Node]
-    Relay2 -->|Encrypted Layer 1| Exit[Exit Node]
-    Exit -->|Plaintext| Internet((Public Internet))
-    
-    style User fill:#f9f,stroke:#333,stroke-width:2px
-    style Entry fill:#bbf,stroke:#333,stroke-width:2px
-    style Exit fill:#bbf,stroke:#333,stroke-width:2px
-    style Internet fill:#f96,stroke:#333,stroke-width:2px
+```
+Browser
+  │  HTTP CONNECT example.com:443
+  ▼
+SOCKS5 Server (127.0.0.1:1080)
+  │  net.Conn → custom dialer → DialCircuit()
+  ▼
+circuit.go — DialCircuit()
+  │  FindPeers("shadowlink-relay") → [relay1, relay2]
+  │  FindPeers("shadowlink-exit")  → [exit1, exit2]
+  │  tryViaRelay(relay1, "example.com:443")
+  │    │  Host.Connect(relay1)
+  │    │  NewStream(relay1, ProtocolID)
+  │    │  stream.Write("RELAY\nexample.com:443\n")
+  │    │  PerformECDH(stream) → sessionKey K₁
+  │    └─ return libP2PConn{stream, K₁}
+  ▼
+libP2PConn.Write(plaintext)
+  │  onion.WrapPayload(plaintext, [K₁])  →  ciphertext
+  │  binary.BigEndian.PutUint32(len)     →  4-byte header
+  │  stream.Write(header + ciphertext)
+  ▼
+  [on relay's side]
+handler.go — handleRelay()
+  │  RespondECDH(stream) → K₁
+  │  FindPeers("shadowlink-exit") → [exit1]
+  │  NewStream(exit1, ProtocolID)
+  │  exitStream.Write("example.com:443\n")
+  │  PerformECDH(exitStream) → K₂
+  │  upstreamConn  = libP2PConn{stream,     K₁}
+  │  downstreamConn = libP2PConn{exitStream, K₂}
+  │  io.Copy(downstreamConn, upstreamConn)
+  ▼
+  [on exit's side]
+handler.go — handleExit()
+  │  RespondECDH(stream) → K₂
+  │  net.Dial("tcp", "example.com:443")
+  │  io.Copy(outConn, libP2PConn{stream, K₂})
+  ▼
+example.com:443 (Public Internet)
 ```
 
-## 2. Serverless Node Discovery (DHT)
+---
 
-Traditional VPNs rely on central servers to track which nodes are online. ShadowLink uses `libp2p`'s DHT.
+## Internal Package Reference
 
-1. When a node starts as a `relay` or `exit`, it announces its presence to the DHT using a rendezvous string (e.g., `shadowlink-relay`).
-2. When an `entry` node needs to build a circuit, it queries the DHT for nodes announcing those rendezvous strings.
+### `internal/crypto`
+| Function | Signature | Description |
+|---|---|---|
+| `GenerateKey()` | `([]byte, error)` | Generates a random 32-byte ChaCha20 key |
+| `Encrypt(key, plaintext)` | `([]byte, error)` | XChaCha20-Poly1305 encrypt with random nonce |
+| `Decrypt(key, ciphertext)` | `([]byte, error)` | Verify AEAD tag and decrypt |
+| `PerformECDH(rw)` | `([]byte, error)` | Initiator X25519: send pubkey first |
+| `RespondECDH(rw)` | `([]byte, error)` | Responder X25519: read pubkey first |
 
-```mermaid
-sequenceDiagram
-    participant Entry
-    participant DHT Network
-    participant Relay/Exit
+### `internal/network`
+| Type/Function | Description |
+|---|---|
+| `DialCircuit(ctx, ds, network, addr)` | Returns `net.Conn` routed through dVPN |
+| `HandleStream(s, role, ds)` | Dispatches relay or exit logic for incoming streams |
+| `libP2PConn` | `net.Conn` wrapper with 4-byte length-prefix framing + AEAD |
 
-    Relay/Exit->>DHT Network: Announce("shadowlink-relay")
-    Entry->>DHT Network: FindPeers("shadowlink-relay")
-    DHT Network-->>Entry: Returns list of active IPs
-    Entry->>Relay/Exit: Establish libp2p secure stream
+### `internal/discovery`
+| Function | Description |
+|---|---|
+| `NewDiscoveryService(ctx, port, bootstraps)` | Creates libp2p host + KadDHT |
+| `Announce(ctx, rendezvous)` | Publishes presence under a rendezvous key |
+| `FindPeers(ctx, rendezvous)` | Returns `[]peer.AddrInfo` of matching peers |
+
+### `internal/onion`
+| Function | Description |
+|---|---|
+| `WrapPayload(data, keys)` | Encrypts with each key from last→first (outermost = first key) |
+| `UnwrapPayload(data, key)` | Peels exactly one encryption layer |
+
+### `internal/socks5`
+| Function | Description |
+|---|---|
+| `NewServer(port, dialer)` | Creates a SOCKS5 server with a custom dialer |
+| `ListenAndServe(ctx)` | Blocks until ctx is cancelled; returns nil on clean shutdown |
+
+### `internal/sysproxy`
+| Function | Platform | Description |
+|---|---|---|
+| `EnableSOCKS5(host, port)` | Windows | Writes `SOCKS=host:port` to HKCU registry |
+| `Disable()` | Windows | Clears `ProxyEnable` in registry |
+| `Disable()` | macOS/Linux | no-op, returns nil |
+
+---
+
+## Wire Protocol
+
+```
+Stream from Entry to Relay (or Entry to Exit):
+  Byte 0..N:  "<target:port>\n"  or  "RELAY\n<target:port>\n"   (ASCII text)
+  Byte N+1..N+32:  Initiator X25519 public key                  (raw 32 bytes)
+  Byte N+33..N+64: Responder X25519 public key                  (raw 32 bytes)
+  [All subsequent bytes are length-framed encrypted frames:]
+    Bytes 0..3:   uint32 big-endian frame length
+    Bytes 4..N:   XChaCha20-Poly1305 ciphertext
 ```
 
-## 3. Onion Routing (Cryptography)
+---
 
-To ensure that no single node knows both the User's IP and the Destination IP, traffic is wrapped in layers of **XChaCha20-Poly1305** encryption.
+## Test Coverage
 
-### Circuit Building
-The Entry Node generates three ephemeral symmetric keys and negotiates them with the selected path nodes (mechanism pending full implementation, traditionally via ECDH like X25519).
+| Package | Test File | Cases |
+|---|---|---|
+| `internal/crypto` | `encryption_test.go` | 8 — Encrypt/Decrypt round-trips, tamper, wrong key |
+| `internal/crypto` | `ecdh_test.go` | 4 — Shared secret equality, length, forward secrecy |
+| `internal/onion` | `onion_test.go` | 5 — 1-layer, 3-layer peel, tamper, empty |
+| `internal/network` | `framing_test.go` | 4 — Round-trip, multi-message, wrong key, large |
+| `internal/network` | `handler_test.go` | 4 — `readLineRaw` boundary correctness |
+| `internal/socks5` | `server_test.go` | 4 — Nil dialer, shutdown, port-in-use |
 
-### Payload Encryption
-When sending a packet, the Entry Node encrypts it multiple times, from the exit node back to the first relay.
-
-```mermaid
-block-beta
-  columns 1
-  space
-  block:Outer
-    columns 1
-    Enc1["Encrypted for Relay 1 (Key 1)"]
-    block:Mid
-      columns 1
-      Enc2["Encrypted for Relay 2 (Key 2)"]
-      block:Inner
-        columns 1
-        Enc3["Encrypted for Exit (Key 3)"]
-        Payload["Target URL / TCP Payload"]
-      end
-    end
-  end
-```
-
-As the packet travels, each node peels off exactly one layer of encryption:
-- **Relay 1** peels layer 1, revealing layer 2 (destined for Relay 2). It does not know the final destination.
-- **Relay 2** peels layer 2, revealing layer 3 (destined for Exit). It does not know who the original sender was.
-- **Exit** peels layer 3, revealing the plaintext payload. It does not know who the original sender was.
+Run: `go test ./... -count=1 -race`

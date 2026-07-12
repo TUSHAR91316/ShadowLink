@@ -1,5 +1,7 @@
 # ShadowLink Code Fixes & Improvements Summary
 
+> **⚠️ LEGACY DOCUMENTATION (v1.x)**: This document refers to fixes applied to the deprecated Python architecture. ShadowLink has been completely rewritten in Go (v2.x).
+
 ## Overview
 This document summarizes all the critical, high-priority, and medium-priority fixes applied to the ShadowLink codebase to improve security, reliability, and code quality.
 

@@ -46,6 +46,7 @@ func NewServer(port int, dialer DialerFunc) (*Server, error) {
 }
 
 // ListenAndServe blocks and listens for incoming browser connections.
+// Returns nil on clean shutdown (context cancelled), or an error on unexpected failure.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
@@ -61,5 +62,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		listener.Close()
 	}()
 
-	return s.srv.Serve(listener)
+	err = s.srv.Serve(listener)
+	// Bug 11 Fix: When context is cancelled, listener.Close() causes Serve() to
+	// return "use of closed network connection". This is expected — treat it as nil.
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
+

@@ -79,8 +79,13 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 // Announce presence in the DHT for a specific rendezvous point
 func (d *DiscoveryService) Announce(ctx context.Context, rendezvous string) error {
 	routingDiscovery := routing.NewRoutingDiscovery(d.DHT)
-	routingDiscovery.Advertise(ctx, rendezvous)
-	log.Printf("Announcing presence on %s", rendezvous)
+	// Bug 8 Fix: Advertise returns a TTL and error — capture them both.
+	_, err := routingDiscovery.Advertise(ctx, rendezvous)
+	if err != nil {
+		log.Printf("Warning: Failed to advertise on DHT for '%s': %v", rendezvous, err)
+		return err
+	}
+	log.Printf("Announcing presence on rendezvous: %s", rendezvous)
 	return nil
 }
 

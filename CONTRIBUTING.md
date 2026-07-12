@@ -18,8 +18,21 @@ git checkout -b 325-add-udp-support
 
 ## Get the test suite running
 
-Make sure you're using Go 1.21+.
-Run `go test ./...` to ensure everything is passing before you start coding.
+Make sure you have **Go 1.21+** and **Flutter 3.10+** installed.
+
+### Go Backend Daemon
+Run the full test suite with race detection enabled before you start coding:
+```sh
+go test -race -v ./...
+```
+
+### Flutter GUI
+Ensure the frontend is clean and tests pass:
+```sh
+cd shadowlink_gui
+flutter analyze
+flutter test
+```
 
 ## Implement your fix or feature
 

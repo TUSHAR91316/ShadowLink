@@ -47,11 +47,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         GestureDetector(
-                          onTap: () {
+                          // I-5 Fix: Use async onTap so stopDaemon is fully awaited
+                          // before any subsequent tap can re-trigger a state change.
+                          onTap: () async {
                             if (isConnected || isConnecting) {
-                              _daemon.stopDaemon();
+                              await _daemon.stopDaemon();
                             } else {
-                              _daemon.startDaemon();
+                              await _daemon.startDaemon();
                             }
                           },
                           child: Container(

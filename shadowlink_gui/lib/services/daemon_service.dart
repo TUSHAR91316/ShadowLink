@@ -1,6 +1,7 @@
-import 'dart:io';
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 
 enum DaemonStatus { disconnected, connecting, connected, error }
 
@@ -10,48 +11,91 @@ class DaemonService {
   DaemonService._internal();
 
   Process? _process;
-  final ValueNotifier<DaemonStatus> statusNotifier = ValueNotifier(DaemonStatus.disconnected);
+  Timer? _connectionTimeout;
+
+  final ValueNotifier<DaemonStatus> statusNotifier =
+      ValueNotifier(DaemonStatus.disconnected);
   final ValueNotifier<String> logNotifier = ValueNotifier("");
 
   bool isEntry = true;
   bool isRelay = false;
   bool isExit = false;
 
+  /// Bug 7 Fix: Compute binary path relative to the Flutter executable,
+  /// not the CWD. Works in both development and production builds.
   String _getBinaryPath() {
-    // For development, we point to the release directory in the parent folder.
-    // In production, this would be bundled via flutter assets or installation scripts.
+    final execDir = File(Platform.resolvedExecutable).parent.path;
+
+    String bundledName;
+    String devName;
+
     if (Platform.isWindows) {
-      return '../release/shadowlink-windows-x64.exe';
+      bundledName = 'shadowlink.exe';
+      devName = 'shadowlink-windows-x64.exe';
     } else if (Platform.isMacOS) {
-      // Simplification: assuming intel for testing. M-series would be shadowlink-macos-apple-silicon
-      return '../release/shadowlink-macos-intel'; 
+      bundledName = 'shadowlink';
+      devName = 'shadowlink-macos-intel';
     } else if (Platform.isLinux) {
-      return '../release/shadowlink-linux-x64';
+      bundledName = 'shadowlink';
+      devName = 'shadowlink-linux-x64';
+    } else {
+      throw UnsupportedError('Unsupported Platform');
     }
-    throw UnsupportedError('Unsupported Platform');
+
+    // Production: binary is placed next to the Flutter executable by the installer.
+    final productionPath = p.join(execDir, bundledName);
+    if (File(productionPath).existsSync()) return productionPath;
+
+    // Development fallback: navigate up from the Flutter build output dir to
+    // the repo root, then into the release folder.
+    // Path: .../shadowlink_gui/build/windows/x64/runner/Debug/ -> ../../../../../
+    final projectRoot = File(Platform.resolvedExecutable)
+        .parent
+        .parent
+        .parent
+        .parent
+        .parent
+        .parent
+        .path;
+    return p.join(projectRoot, 'release', devName);
+  }
+
+  /// Bug 7 Fix: EULA file also uses a stable absolute path.
+  String _getEulaPath() {
+    final execDir = File(Platform.resolvedExecutable).parent.path;
+    return p.join(execDir, '.shadowlink_accepted');
   }
 
   Future<void> startDaemon() async {
     if (_process != null) return;
-    
+
     statusNotifier.value = DaemonStatus.connecting;
     logNotifier.value = "Starting ShadowLink Daemon...\n";
+
+    // I-4 Fix: Cancel any existing timeout and set a 30-second connection watchdog.
+    _connectionTimeout?.cancel();
+    _connectionTimeout = Timer(const Duration(seconds: 30), () {
+      if (statusNotifier.value == DaemonStatus.connecting) {
+        logNotifier.value += '\nConnection timeout after 30s. Stopping daemon.';
+        stopDaemon();
+      }
+    });
 
     try {
       List<String> args = [];
       if (isEntry) args.add('--entry');
       if (isRelay) args.add('--relay');
       if (isExit) args.add('--exit');
-      
-      // We also auto-configure sysproxy if on Windows and entry is enabled
+
+      // Auto-configure system proxy on Windows when acting as entry node.
       if (isEntry && Platform.isWindows) {
         args.add('--sysproxy');
       }
 
-      String binPath = _getBinaryPath();
-      
-      // Before starting, ensure EULA is "accepted" for the CLI so it doesn't hang waiting for stdin
-      final eulaFile = File('../.shadowlink_accepted');
+      final binPath = _getBinaryPath();
+
+      // Write the EULA acceptance file so the CLI daemon does not hang on stdin.
+      final eulaFile = File(_getEulaPath());
       if (!await eulaFile.exists()) {
         await eulaFile.writeAsString('accepted');
       }
@@ -61,10 +105,11 @@ class DaemonService {
       _process!.stdout.listen((data) {
         final line = String.fromCharCodes(data);
         logNotifier.value += line;
-        
-        // Optimize status detection to be faster and support concurrent roles
-        if (line.contains("Starting local SOCKS5 proxy") || line.contains("Announce")) {
-           statusNotifier.value = DaemonStatus.connected;
+
+        if (line.contains("Starting local SOCKS5 proxy") ||
+            line.contains("Announce")) {
+          _connectionTimeout?.cancel(); // Connected — cancel the timeout.
+          statusNotifier.value = DaemonStatus.connected;
         }
       });
 
@@ -73,12 +118,13 @@ class DaemonService {
       });
 
       _process!.exitCode.then((code) {
+        _connectionTimeout?.cancel();
         logNotifier.value += "\nDaemon exited with code $code";
         statusNotifier.value = DaemonStatus.disconnected;
         _process = null;
       });
-
     } catch (e) {
+      _connectionTimeout?.cancel();
       statusNotifier.value = DaemonStatus.error;
       logNotifier.value += "\nFailed to start daemon: $e";
       _process = null;
@@ -86,14 +132,15 @@ class DaemonService {
   }
 
   Future<void> stopDaemon() async {
+    _connectionTimeout?.cancel();
     if (_process != null) {
       logNotifier.value += "\nStopping daemon...";
       _process!.kill();
       _process = null;
       statusNotifier.value = DaemonStatus.disconnected;
 
-      // Failsafe: Windows Process.kill() is a hard terminate and skips Go defers.
-      // We manually execute the proxy reset flag to guarantee internet is restored.
+      // Failsafe: On Windows, Process.kill() is a hard SIGKILL and skips Go defers.
+      // Explicitly invoke the --reset-proxy flag to restore internet connectivity.
       if (Platform.isWindows && isEntry) {
         try {
           await Process.run(_getBinaryPath(), ['--reset-proxy']);

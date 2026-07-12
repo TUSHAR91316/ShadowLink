@@ -1,5 +1,7 @@
 # ShadowLink Python Codebase - Comprehensive Code Quality Analysis
 
+> **⚠️ LEGACY DOCUMENTATION (v1.x)**: This document refers to the deprecated Python architecture. ShadowLink has been completely rewritten in Go (v2.x). See `ARCHITECTURE.md` at the project root for the modern implementation.
+
 ## Executive Summary
 
 The ShadowLink codebase implements a secure tunnel proxy system with encryption, but contains **critical security vulnerabilities**, **significant logic errors**, and **numerous code quality issues**. The analysis identified **27 distinct issues** across 11 categories, with 5 critical/high-severity findings that require immediate attention.

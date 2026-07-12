@@ -5,8 +5,13 @@ Welcome to the new era of ShadowLink! This release completely transitions the ne
 > **LEGAL DISCLAIMER:** By downloading or executing any of these binaries, you legally bind yourself to the [TERMS_AND_CONDITIONS.md](../TERMS_AND_CONDITIONS.md). The developers assume absolutely zero liability for your actions. Running an Exit Node exposes your IP address to third-party traffic; you do so entirely at your own personal and legal risk.
 
 ## Cross-Platform Binaries
-Included in this folder are statically linked, zero-dependency binaries for all major operating systems:
+Included in this folder are statically linked, zero-dependency binaries for all major operating systems, paired with a brand-new Flutter Desktop GUI:
 
+### GUI Application (shadowlink_gui)
+- `shadowlink-gui-windows-x64.exe` (Standalone Windows Installer)
+- The installer automatically bundles the Go daemon process.
+
+### CLI Backend (headless)
 - `shadowlink-windows-x64.exe`: For Windows 10/11 (64-bit)
 - `shadowlink-macos-intel`: For macOS (Intel processors)
 - `shadowlink-macos-apple-silicon`: For macOS (Apple Silicon M1/M2/M3)

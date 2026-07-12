@@ -11,16 +11,18 @@ ShadowLink is a next-generation **Decentralized VPN (dVPN)** built in Go. Moving
 ## 🚀 Key Features
 
 ### 🔒 Security & Privacy (Onion Routing)
-- **Multi-Hop Architecture**: Traffic bounces through Entry, Relay, and Exit nodes. No single node knows both your IP and your destination, protecting you from tracking.
+- **Multi-Hop Architecture**: Traffic bounces through Entry, Relay, and Exit nodes (3-hop routing). No single node knows both your IP and your destination, protecting you from tracking.
+- **Perfect Forward Secrecy**: Ephemeral X25519 ECDH key exchange generates a unique session key for every single connection.
 - **XChaCha20-Poly1305 AEAD**: State-of-the-art authenticated encryption with random nonces ensures robust security against tampering and replay attacks.
-- **DPI Evasion**: Multi-layered encryption prevents Deep Packet Inspection from identifying traffic type.
+- **DPI Evasion**: Multi-layered encryption with 4-byte length-prefix framing prevents Deep Packet Inspection from identifying traffic type.
 
 ### 🌐 Decentralized Networking (DHT)
 - **Serverless Node Discovery**: Uses `libp2p` Kademlia DHT to find available nodes on the network dynamically. No central tracking servers to shut down.
 - **Community Driven**: Purely free network. Anyone can run an Entry, Relay, or Exit node to contribute bandwidth.
 
 ### 💻 Cross-Platform & Mobile Ready
-- **Written in Go**: Extremely fast, memory-safe, and highly concurrent networking.
+- **Go Backend**: Extremely fast, memory-safe, and highly concurrent networking.
+- **Flutter Desktop GUI**: A beautiful, modern "cyber" aesthetic interface to manage your daemon connection and node roles.
 - **Universal Support**: Compiles natively to Windows, macOS, Linux, and can be ported to iOS/Android via `gomobile`.
 - **System-Wide Proxy**: Built-in OS proxy configuration (SOCKS5).
 
@@ -31,6 +33,7 @@ ShadowLink is a next-generation **Decentralized VPN (dVPN)** built in Go. Moving
 - **Git**
 
 ### 1. Install & Build
+### 1. Build the Go Daemon
 ```bash
 git clone https://github.com/TUSHAR91316/ShadowLink.git
 cd ShadowLink
@@ -39,7 +42,14 @@ cd ShadowLink
 go mod tidy
 
 # Build the binary
-go build -o shadowlink
+go build -o release/shadowlink-windows-x64.exe ./cmd/shadowlink
+```
+
+### 2. Run the Flutter GUI
+```bash
+cd shadowlink_gui
+flutter pub get
+flutter run -d windows
 ```
 
 ### 2. Run ShadowLink
@@ -69,11 +79,11 @@ ShadowLink operates as a unified node. You can run it in different roles concurr
 
 ## 🏗️ Architecture Migration (v1.x -> v2.x)
 
-For a complete breakdown of the new Flutter + Go architecture and how the system components interact, please refer to the [ARCHITECTURE.md](ARCHITECTURE.md) diagram.
+For a complete breakdown of the new Flutter + Go architecture and how the system components interact, please refer to the [ARCHITECTURE.md](ARCHITECTURE.md) diagram and the [developer deep-dive](docs/ARCHITECTURE.md).
 
-ShadowLink has been completely rewritten from Python to **Go**. 
-- **Legacy Code**: The old Python Client-Server architecture (v1) has been archived in the `legacy_python/` directory.
-- **New Core**: The new architecture embraces P2P networking via `libp2p` and replaces basic XOR obfuscation with strict `x/crypto` standards.
+ShadowLink has been completely rewritten from Python to **Go** for the backend daemon, and from Electron/React to **Flutter** for the frontend GUI. 
+- **Legacy Code**: The old Python Client-Server architecture (v1) has been archived in the `legacy_python/` directory. Legacy docs remain in `docs/` for historical context.
+- **New Core**: The new architecture embraces P2P networking via `libp2p`, perfect forward secrecy via `crypto/ecdh`, and strict 3-hop circuit routing.
 
 ## 🤝 Contributing
 As a decentralized network, the strength of ShadowLink relies on the community.

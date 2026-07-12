@@ -1,5 +1,7 @@
 # Release v1.0.0 - Electron Evolution: Hybrid Architecture & Cyber UI
 
+> **⚠️ LEGACY RELEASE (v1.0.0)**: This release notes file documents the deprecated Electron + Python architecture. See `release/release.md` for the current v2.0.0 Go + Flutter release.
+
 > **Major Update**: Replaced legacy GUI with a high-performance Electron + React frontend.
 
 Includes `ShadowLink Setup 1.0.0.exe` for Windows x64.

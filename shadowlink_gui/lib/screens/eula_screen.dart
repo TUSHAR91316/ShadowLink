@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
 
@@ -16,12 +18,18 @@ class _EulaScreenState extends State<EulaScreen> {
   @override
   void initState() {
     super.initState();
-    _checkExistingEula();
+    // Bug 6 Fix: Defer navigation until after the first frame is fully rendered.
+    // Calling Navigator from initState directly causes a widget-tree lookup crash.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkExistingEula();
+    });
   }
 
   Future<void> _checkExistingEula() async {
-    final file = File('../.shadowlink_accepted');
+    final eulaPath = _getEulaPath();
+    final file = File(eulaPath);
     if (await file.exists()) {
+      if (!mounted) return; // Guard against async gap after widget dispose
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
       );
@@ -29,11 +37,21 @@ class _EulaScreenState extends State<EulaScreen> {
   }
 
   Future<void> _acceptEula() async {
-    final file = File('../.shadowlink_accepted');
+    final eulaPath = _getEulaPath();
+    final file = File(eulaPath);
     await file.writeAsString('accepted');
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const DashboardScreen()),
     );
+  }
+
+  /// Bug 7 / I-8 Fix: Compute a stable absolute path for the EULA acceptance file.
+  /// Uses the directory of the Flutter executable so it works in both
+  /// development (run from project root) and production (installed app).
+  String _getEulaPath() {
+    final execDir = File(Platform.resolvedExecutable).parent.path;
+    return p.join(execDir, '.shadowlink_accepted');
   }
 
   @override
