@@ -56,13 +56,18 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	log.Printf("SOCKS5 Proxy listening on %s", addr)
 
-	// Close listener when context is cancelled
+	stopCh := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		listener.Close()
+		select {
+		case <-ctx.Done():
+			listener.Close()
+		case <-stopCh:
+			// Server exited cleanly before context was cancelled
+		}
 	}()
 
 	err = s.srv.Serve(listener)
+	close(stopCh)
 	// Bug 11 Fix: When context is cancelled, listener.Close() causes Serve() to
 	// return "use of closed network connection". This is expected — treat it as nil.
 	if ctx.Err() != nil {

@@ -153,19 +153,31 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 // with a 4-byte big-endian length prefix for reliable stream parsing.
 type libP2PConn struct {
 	network.Stream
-	Keys [][]byte
+	Keys    [][]byte
+	readBuf []byte
 }
 
-// Read reads one complete length-prefixed encrypted frame, decrypts it, and returns the plaintext.
-// Bug 3 Fix: The length prefix guarantees a full encrypted packet is always available before
-// attempting decryption, preventing silent corruption from TCP partial reads.
+const MaxFrameSize = 128 * 1024 // 128 KB
+
 func (c *libP2PConn) Read(b []byte) (int, error) {
+	// Yield buffered plaintext from a previous partial read if available
+	if len(c.readBuf) > 0 {
+		n := copy(b, c.readBuf)
+		c.readBuf = c.readBuf[n:]
+		return n, nil
+	}
+
 	// Step 1: Read the 4-byte big-endian frame length
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(c.Stream, lenBuf); err != nil {
 		return 0, err
 	}
 	frameLen := binary.BigEndian.Uint32(lenBuf)
+
+	// Security: Prevent OOM DoS by enforcing a maximum frame size
+	if frameLen > MaxFrameSize {
+		return 0, fmt.Errorf("frame length %d exceeds max frame size %d", frameLen, MaxFrameSize)
+	}
 
 	// Step 2: Read exactly frameLen bytes (the complete encrypted frame)
 	frame := make([]byte, frameLen)
@@ -179,7 +191,14 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 		return 0, fmt.Errorf("decryption failed: %v", err)
 	}
 
-	return copy(b, plaintext), nil
+	// Step 4: Copy plaintext into the caller's buffer, saving any remainder
+	n := copy(b, plaintext)
+	if n < len(plaintext) {
+		// Prevent truncation: buffer the remaining decrypted bytes for the next Read call
+		c.readBuf = plaintext[n:]
+	}
+
+	return n, nil
 }
 
 // Write encrypts the payload with the per-session key and prepends a 4-byte length header.
