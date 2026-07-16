@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-headless:
@@ -78,9 +79,62 @@ jobs:
           name: gui-windows
           path: release/shadowlink-gui-windows-x64.zip
 
+  build-gui-android:
+    name: Build Flutter GUI (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup gomobile
+        run: |
+          go get -tool golang.org/x/mobile/cmd/gobind
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+
+      - name: Build Android AAR (gomobile)
+        run: |
+          mkdir -p shadowlink_gui/android/app/libs
+          gomobile bind -v -target=android -o shadowlink_gui/android/app/libs/mobile.aar github.com/shadowlink/core/mobile
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install dependencies
+        working-directory: ./shadowlink_gui
+        run: flutter pub get
+
+      - name: Build Android APK
+        working-directory: ./shadowlink_gui
+        run: flutter build apk --release
+
+      - name: Copy APK to release
+        run: |
+          mkdir -p release
+          cp shadowlink_gui/build/app/outputs/flutter-apk/app-release.apk release/shadowlink-android.apk
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-android
+          path: release/shadowlink-android.apk
+
   create-release:
     name: Create GitHub Release
-    needs: [build-headless, build-gui-windows]
+    needs: [build-headless, build-gui-windows, build-gui-android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

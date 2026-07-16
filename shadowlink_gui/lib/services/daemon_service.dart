@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+import 'package:flutter/services.dart';
 
 enum DaemonStatus { disconnected, connecting, connected, error }
 
@@ -20,6 +21,8 @@ class DaemonService {
   bool isEntry = true;
   bool isRelay = false;
   bool isExit = false;
+
+  static const MethodChannel _mobileChannel = MethodChannel('com.shadowlink/daemon');
 
   /// Bug 7 Fix: Compute binary path relative to the Flutter executable,
   /// not the CWD. Works in both development and production builds.
@@ -82,6 +85,17 @@ class DaemonService {
     });
 
     try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        logNotifier.value += "Invoking mobile MethodChannel...\n";
+        bool started = await _mobileChannel.invokeMethod('start', {"port": 1080});
+        if (started) {
+          logNotifier.value += "Mobile Daemon Started Successfully\n";
+          _connectionTimeout?.cancel();
+          statusNotifier.value = DaemonStatus.connected;
+        }
+        return;
+      }
+
       List<String> args = [];
       if (isEntry) args.add('--entry');
       if (isRelay) args.add('--relay');
@@ -133,6 +147,18 @@ class DaemonService {
 
   Future<void> stopDaemon() async {
     _connectionTimeout?.cancel();
+
+    if (Platform.isAndroid || Platform.isIOS) {
+      try {
+        logNotifier.value += "\nStopping mobile daemon...";
+        await _mobileChannel.invokeMethod('stop');
+        statusNotifier.value = DaemonStatus.disconnected;
+      } catch (e) {
+        logNotifier.value += "\nFailed to stop mobile daemon: $e";
+      }
+      return;
+    }
+
     if (_process != null) {
       logNotifier.value += "\nStopping daemon...";
       _process!.kill();
