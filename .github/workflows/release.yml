@@ -106,7 +106,7 @@ jobs:
       - name: Build Android AAR (gomobile)
         run: |
           mkdir -p shadowlink_gui/android/app/libs
-          gomobile bind -v -target=android -o shadowlink_gui/android/app/libs/mobile.aar github.com/shadowlink/core/mobile
+          gomobile bind -v -target=android -o shadowlink_gui/android/app/libs/mobile.aar ./mobile
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
