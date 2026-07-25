@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../services/daemon_service.dart';
+
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({Key? key}) : super(key: key);
@@ -112,20 +114,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         onChanged: isConnected ? null : (val) => setState(() => _daemon.isEntry = val),
                         activeColor: AppTheme.primary,
                       ),
-                      SwitchListTile(
-                        title: const Text("Contribute Bandwidth (Relay Node)", style: TextStyle(color: AppTheme.textMain)),
-                        subtitle: const Text("Help route encrypted traffic for others", style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
-                        value: _daemon.isRelay,
-                        onChanged: isConnected ? null : (val) => setState(() => _daemon.isRelay = val),
-                        activeColor: AppTheme.primary,
-                      ),
-                      SwitchListTile(
-                        title: const Text("Exit Node Operator", style: TextStyle(color: AppTheme.error)),
-                        subtitle: const Text("WARNING: Public traffic exits your IP", style: TextStyle(color: AppTheme.error, fontSize: 12)),
-                        value: _daemon.isExit,
-                        onChanged: isConnected ? null : (val) => setState(() => _daemon.isExit = val),
-                        activeColor: AppTheme.error,
-                      ),
+                      // Relay and Exit nodes are only supported on Desktop platforms.
+                      // On Android/iOS, the Go engine runs in entry-node-only mode.
+                      if (!Platform.isAndroid && !Platform.isIOS) ...([
+                        SwitchListTile(
+                          title: const Text("Contribute Bandwidth (Relay Node)", style: TextStyle(color: AppTheme.textMain)),
+                          subtitle: const Text("Help route encrypted traffic for others", style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
+                          value: _daemon.isRelay,
+                          onChanged: isConnected ? null : (val) => setState(() => _daemon.isRelay = val),
+                          activeColor: AppTheme.primary,
+                        ),
+                        SwitchListTile(
+                          title: const Text("Exit Node Operator", style: TextStyle(color: AppTheme.error)),
+                          subtitle: const Text("WARNING: Public traffic exits your IP", style: TextStyle(color: AppTheme.error, fontSize: 12)),
+                          value: _daemon.isExit,
+                          onChanged: isConnected ? null : (val) => setState(() => _daemon.isExit = val),
+                          activeColor: AppTheme.error,
+                        ),
+                      ]),
                     ],
                   ),
                 )

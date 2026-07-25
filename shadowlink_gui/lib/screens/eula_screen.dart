@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
+
 
 class EulaScreen extends StatefulWidget {
   const EulaScreen({Key? key}) : super(key: key);
@@ -26,8 +28,9 @@ class _EulaScreenState extends State<EulaScreen> {
   }
 
   Future<void> _checkExistingEula() async {
-    final eulaPath = _getEulaPath();
+    final eulaPath = await _getEulaPath();
     final file = File(eulaPath);
+
     if (await file.exists()) {
       if (!mounted) return; // Guard against async gap after widget dispose
       Navigator.of(context).pushReplacement(
@@ -37,8 +40,9 @@ class _EulaScreenState extends State<EulaScreen> {
   }
 
   Future<void> _acceptEula() async {
-    final eulaPath = _getEulaPath();
+    final eulaPath = await _getEulaPath();
     final file = File(eulaPath);
+
     await file.writeAsString('accepted');
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
@@ -46,10 +50,14 @@ class _EulaScreenState extends State<EulaScreen> {
     );
   }
 
-  /// Bug 7 / I-8 Fix: Compute a stable absolute path for the EULA acceptance file.
-  /// Uses the directory of the Flutter executable so it works in both
-  /// development (run from project root) and production (installed app).
-  String _getEulaPath() {
+  /// Returns a writable path for the EULA acceptance file.
+  /// On mobile (Android/iOS) Platform.resolvedExecutable is not writable,
+  /// so we use the app documents directory via path_provider.
+  Future<String> _getEulaPath() async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      final dir = await getApplicationDocumentsDirectory();
+      return p.join(dir.path, '.shadowlink_accepted');
+    }
     final execDir = File(Platform.resolvedExecutable).parent.path;
     return p.join(execDir, '.shadowlink_accepted');
   }

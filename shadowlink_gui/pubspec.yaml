@@ -37,6 +37,9 @@ dependencies:
   # Required for robust cross-platform path manipulation in DaemonService and EulaScreen.
   path: ^1.9.0
 
+  # Required for resolving writable directories on Android and iOS.
+  path_provider: ^2.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

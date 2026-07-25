@@ -18,26 +18,6 @@ electron/resources/*.exe
 electron/release/
 electron/build/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-venv/
-.venv/
-.env
-
-# Node
-node_modules/
-npm-debug.log
-
-# Electron Build
-electron/out/
-electron/dist/
-electron/dist_installer/
-electron/resources/*.exe
-electron/release/
-electron/build/
-
 # IDE
 .vscode/
 .idea/
@@ -47,6 +27,21 @@ electron/build/
 *.bak
 .ai/
 
+# Temp/Debug files
+jobs.json
+runs.json
+job_log_android.txt
+
 # Go Binaries
 shadowlink
 shadowlink.exe
+
+# Flutter build output
+shadowlink_gui/build/
+shadowlink_gui/.dart_tool/
+
+# Android generated native libs (built by CI)
+shadowlink_gui/android/app/libs/
+
+# iOS generated XCFramework (built by CI)
+shadowlink_gui/ios/Mobile.xcframework/

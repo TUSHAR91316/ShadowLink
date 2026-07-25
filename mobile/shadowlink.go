@@ -19,7 +19,8 @@ type MobileNode struct {
 
 // StartEntryNode is the entry point for the Mobile UI. When the user taps the "Connect"
 // button in your future iOS/Android app, it will call this function.
-func StartEntryNode(socksPort int) (*MobileNode, error) {
+// NOTE: socksPort is int64 because gomobile maps Go int64 -> Java long and Swift Int.
+func StartEntryNode(socksPort int64) (*MobileNode, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Use port 0 to let the mobile OS dynamically assign a free networking port
@@ -34,7 +35,7 @@ func StartEntryNode(socksPort int) (*MobileNode, error) {
 	}
 
 	// Start the SOCKS5 proxy on the mobile device
-	proxy, err := socks5.NewServer(socksPort, dialer)
+	proxy, err := socks5.NewServer(int(socksPort), dialer)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to init proxy: %v", err)

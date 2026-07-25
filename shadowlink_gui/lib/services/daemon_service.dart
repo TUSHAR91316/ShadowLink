@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+
 
 enum DaemonStatus { disconnected, connecting, connected, error }
 
@@ -23,6 +25,8 @@ class DaemonService {
   bool isExit = false;
 
   static const MethodChannel _mobileChannel = MethodChannel('com.shadowlink/daemon');
+  bool _mobileStarted = false; // Guard against duplicate MethodChannel calls
+
 
   /// Bug 7 Fix: Compute binary path relative to the Flutter executable,
   /// not the CWD. Works in both development and production builds.
@@ -63,14 +67,25 @@ class DaemonService {
     return p.join(projectRoot, 'release', devName);
   }
 
-  /// Bug 7 Fix: EULA file also uses a stable absolute path.
-  String _getEulaPath() {
+  /// Returns a writable path for the EULA acceptance file.
+  /// On mobile (Android/iOS) Platform.resolvedExecutable is unavailable,
+  /// so we fall back to the app documents directory via path_provider.
+  Future<String> _getEulaPath() async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      final dir = await getApplicationDocumentsDirectory();
+      return p.join(dir.path, '.shadowlink_accepted');
+    }
     final execDir = File(Platform.resolvedExecutable).parent.path;
     return p.join(execDir, '.shadowlink_accepted');
   }
 
   Future<void> startDaemon() async {
-    if (_process != null) return;
+    // Guard: on desktop check process; on mobile check our own flag
+    if (Platform.isAndroid || Platform.isIOS) {
+      if (_mobileStarted) return;
+    } else {
+      if (_process != null) return;
+    }
 
     statusNotifier.value = DaemonStatus.connecting;
     logNotifier.value = "Starting ShadowLink Daemon...\n";
@@ -89,6 +104,7 @@ class DaemonService {
         logNotifier.value += "Invoking mobile MethodChannel...\n";
         bool started = await _mobileChannel.invokeMethod('start', {"port": 1080});
         if (started) {
+          _mobileStarted = true;
           logNotifier.value += "Mobile Daemon Started Successfully\n";
           _connectionTimeout?.cancel();
           statusNotifier.value = DaemonStatus.connected;
@@ -109,7 +125,8 @@ class DaemonService {
       final binPath = _getBinaryPath();
 
       // Write the EULA acceptance file so the CLI daemon does not hang on stdin.
-      final eulaFile = File(_getEulaPath());
+      final eulaFile = File(await _getEulaPath());
+
       if (!await eulaFile.exists()) {
         await eulaFile.writeAsString('accepted');
       }
@@ -152,6 +169,7 @@ class DaemonService {
       try {
         logNotifier.value += "\nStopping mobile daemon...";
         await _mobileChannel.invokeMethod('stop');
+        _mobileStarted = false;
         statusNotifier.value = DaemonStatus.disconnected;
       } catch (e) {
         logNotifier.value += "\nFailed to stop mobile daemon: $e";
