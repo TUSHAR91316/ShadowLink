@@ -132,9 +132,91 @@ jobs:
           name: gui-android
           path: release/shadowlink-android.apk
 
+  build-gui-ios:
+    name: Build Flutter GUI (iOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup gomobile
+        run: |
+          go get -tool golang.org/x/mobile/cmd/gobind
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+
+      - name: Build iOS XCFramework (gomobile)
+        run: |
+          gomobile bind -v -target=ios,iossimulator -o shadowlink_gui/ios/Mobile.xcframework ./mobile
+
+      - name: Setup Ruby and Xcodeproj
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+          bundler-cache: true
+      - name: Embed XCFramework in Xcode Project
+        run: |
+          gem install xcodeproj
+          ruby -e "
+          require 'xcodeproj'
+          project_path = 'shadowlink_gui/ios/Runner.xcodeproj'
+          project = Xcodeproj::Project.open(project_path)
+          target = project.targets.first
+          framework_group = project.main_group.find_subpath('Frameworks', true)
+          file_ref = framework_group.new_reference('../Mobile.xcframework')
+          
+          # Add to Frameworks Build Phase
+          target.frameworks_build_phase.add_file_reference(file_ref, true)
+          
+          # Add to Embed Frameworks Build Phase
+          embed_phase = target.build_phases.find { |p| p.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && p.name == 'Embed Frameworks' }
+          if embed_phase.nil?
+            embed_phase = project.new(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase)
+            embed_phase.name = 'Embed Frameworks'
+            embed_phase.symbol_dst_subfolder_spec = :frameworks
+            target.build_phases << embed_phase
+          end
+          build_file = embed_phase.add_file_reference(file_ref, true)
+          build_file.settings = { 'ATTRIBUTES' => ['CodeSignOnCopy', 'RemoveHeadersOnCopy'] }
+          
+          project.save
+          "
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install dependencies
+        working-directory: ./shadowlink_gui
+        run: flutter pub get
+
+      - name: Build iOS App
+        working-directory: ./shadowlink_gui
+        run: flutter build ios --release --no-codesign
+
+      - name: Package iOS IPA
+        run: |
+          mkdir -p release
+          cd shadowlink_gui/build/ios/iphoneos
+          mkdir -p Payload
+          mv Runner.app Payload/
+          zip -r ../../../../release/shadowlink-ios.ipa Payload
+
+      - name: Upload iOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-ios
+          path: release/shadowlink-ios.ipa
+
   create-release:
     name: Create GitHub Release
-    needs: [build-headless, build-gui-windows, build-gui-android]
+    needs: [build-headless, build-gui-windows, build-gui-android, build-gui-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
