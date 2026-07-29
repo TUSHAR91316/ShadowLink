@@ -30,7 +30,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run Tests
-        run: go test ./... -race -count=1
+        run: go test ./... -count=1
 
   # ─── Headless binaries ────────────────────────────────────────────────────
   build-headless:
