@@ -1,38 +1,58 @@
-import 'dart:async';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+
+import '../config/app_config.dart';
 import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
 
-
 class EulaScreen extends StatefulWidget {
-  const EulaScreen({Key? key}) : super(key: key);
+  const EulaScreen({super.key});
 
   @override
+  // ignore: library_private_types_in_public_api
   _EulaScreenState createState() => _EulaScreenState();
 }
 
 class _EulaScreenState extends State<EulaScreen> {
   bool _accepted = false;
+  String _eulaText = 'Loading terms…';
 
   @override
   void initState() {
     super.initState();
-    // Bug 6 Fix: Defer navigation until after the first frame is fully rendered.
-    // Calling Navigator from initState directly causes a widget-tree lookup crash.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkExistingEula();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.wait([
+        _loadEulaText(),
+        _checkExistingEula(),
+      ]);
     });
   }
 
+  /// Loads the EULA text from the bundled asset (kTermsAssetKey).
+  /// Falls back to a short notice if the asset cannot be read.
+  Future<void> _loadEulaText() async {
+    try {
+      // Asset key sourced from app_config — not a hardcoded string literal.
+      final text = await rootBundle.loadString(kTermsAssetKey);
+      if (mounted) setState(() => _eulaText = text);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _eulaText =
+            'Could not load TERMS_AND_CONDITIONS.md.\n'
+            'Please read the file in the repository root before proceeding.');
+      }
+    }
+  }
+
+  /// Skips the EULA screen if the user accepted in a prior session.
   Future<void> _checkExistingEula() async {
     final eulaPath = await _getEulaPath();
-    final file = File(eulaPath);
-
-    if (await file.exists()) {
-      if (!mounted) return; // Guard against async gap after widget dispose
+    if (await File(eulaPath).exists()) {
+      if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
       );
@@ -41,9 +61,7 @@ class _EulaScreenState extends State<EulaScreen> {
 
   Future<void> _acceptEula() async {
     final eulaPath = await _getEulaPath();
-    final file = File(eulaPath);
-
-    await file.writeAsString('accepted');
+    await File(eulaPath).writeAsString('accepted');
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const DashboardScreen()),
@@ -51,15 +69,14 @@ class _EulaScreenState extends State<EulaScreen> {
   }
 
   /// Returns a writable path for the EULA acceptance file.
-  /// On mobile (Android/iOS) Platform.resolvedExecutable is not writable,
-  /// so we use the app documents directory via path_provider.
+  /// File name sourced from [kEulaFileName] in app_config.
   Future<String> _getEulaPath() async {
     if (Platform.isAndroid || Platform.isIOS) {
       final dir = await getApplicationDocumentsDirectory();
-      return p.join(dir.path, '.shadowlink_accepted');
+      return p.join(dir.path, kEulaFileName);
     }
     final execDir = File(Platform.resolvedExecutable).parent.path;
-    return p.join(execDir, '.shadowlink_accepted');
+    return p.join(execDir, kEulaFileName);
   }
 
   @override
@@ -73,7 +90,7 @@ class _EulaScreenState extends State<EulaScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                "SHADOWLINK EULA",
+                'SHADOWLINK EULA',
                 style: TextStyle(
                   color: AppTheme.error,
                   fontSize: 28,
@@ -83,7 +100,8 @@ class _EulaScreenState extends State<EulaScreen> {
               ),
               const SizedBox(height: 16),
               const Text(
-                "WARNING: By using this software, you legally bind yourself to the absolute terms of service.",
+                'WARNING: By using this software, you legally bind yourself '
+                'to the absolute terms of service.',
                 style: TextStyle(color: AppTheme.textMain, fontSize: 16),
               ),
               const SizedBox(height: 24),
@@ -93,17 +111,15 @@ class _EulaScreenState extends State<EulaScreen> {
                   decoration: BoxDecoration(
                     color: AppTheme.surface,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: AppTheme.textMuted.withOpacity(0.3)),
+                    border: Border.all(
+                      color: AppTheme.textMuted.withValues(alpha: 0.3),
+                    ),
                   ),
-                  child: const SingleChildScrollView(
+                  child: SingleChildScrollView(
                     child: Text(
-                      "1. NO INFRASTRUCTURE: ShadowLink is an open-source protocol. The developers operate NO network servers and have NO control over peer-to-peer traffic.\n\n"
-                      "2. ZERO LIABILITY: The developers assume ABSOLUTELY ZERO LIABILITY for any damages, legal repercussions, or network traffic.\n\n"
-                      "3. COMPLIANCE: You assume 100% of the legal risk. You agree NOT to use this software to violate any laws.\n\n"
-                      "4. EXIT NODES: Running an Exit Node exposes your IP to third-party traffic. You do so ENTIRELY at your own risk.\n\n"
-                      "5. NO DUTY OF CARE: The developers owe you no duty of care, equitable duty, or other legal obligation worldwide.\n\n"
-                      "By clicking Accept, you acknowledge that you have read the full TERMS_AND_CONDITIONS.md file in the root directory.",
-                      style: TextStyle(color: AppTheme.textMuted, height: 1.5),
+                      _eulaText,
+                      style: const TextStyle(
+                          color: AppTheme.textMuted, height: 1.5),
                     ),
                   ),
                 ),
@@ -114,15 +130,11 @@ class _EulaScreenState extends State<EulaScreen> {
                   Checkbox(
                     value: _accepted,
                     activeColor: AppTheme.error,
-                    onChanged: (val) {
-                      setState(() {
-                        _accepted = val ?? false;
-                      });
-                    },
+                    onChanged: (val) => setState(() => _accepted = val ?? false),
                   ),
                   const Expanded(
                     child: Text(
-                      "I accept 100% of the legal risk and absolute liability.",
+                      'I accept 100% of the legal risk and absolute liability.',
                       style: TextStyle(color: AppTheme.textMain),
                     ),
                   ),
@@ -134,12 +146,13 @@ class _EulaScreenState extends State<EulaScreen> {
                 child: ElevatedButton(
                   onPressed: _accepted ? _acceptEula : null,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _accepted ? AppTheme.error : AppTheme.surface,
+                    backgroundColor:
+                        _accepted ? AppTheme.error : AppTheme.surface,
                     foregroundColor: Colors.white,
                   ),
-                  child: const Text("I ACCEPT"),
+                  child: const Text('I ACCEPT'),
                 ),
-              )
+              ),
             ],
           ),
         ),

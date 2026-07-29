@@ -16,8 +16,7 @@ class AppTheme {
       primaryColor: primary,
       colorScheme: const ColorScheme.dark(
         primary: primary,
-        surface: surface,
-        background: background,
+        surface: surface,  // 'background' field is deprecated — surface covers both roles
       ),
       appBarTheme: const AppBarTheme(
         backgroundColor: background,
@@ -40,7 +39,10 @@ class AppTheme {
           return textMuted;
         }),
         trackColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return primary.withOpacity(0.5);
+          // withValues() replaces deprecated withOpacity() to avoid precision loss
+          if (states.contains(WidgetState.selected)) {
+            return primary.withValues(alpha: 0.5);
+          }
           return surface;
         }),
       ),

@@ -9,30 +9,31 @@ import (
 	"strings"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
+	"github.com/shadowlink/core/internal/config"
 	"github.com/shadowlink/core/internal/crypto"
 	"github.com/shadowlink/core/internal/discovery"
 )
 
-// rawReadWriter combines a buffered reader (for safe line reads) with the raw stream
-// writer (no buffering). This prevents ECDH key exchange deadlocks: if both sides
-// used buffered writers and waited for each other's key, neither write would flush.
+// rawReadWriter combines a reader with the raw stream writer (no buffering).
+// This prevents ECDH key exchange deadlocks: if both sides used buffered writers
+// and waited for each other's key, neither write would ever flush.
 type rawReadWriter struct {
 	io.Reader
 	io.Writer
 }
 
 // HandleStream dispatches an incoming libp2p stream to the appropriate handler
-// based on the node's configured role (relay or exit) and the protocol header.
+// based on the protocol header sent by the entry node.
 //
-// Bug 4 Fix: Relay nodes now fully forward traffic instead of just closing the stream.
-// Bug 1 Fix: All connections use per-session X25519 ECDH keys instead of a hardcoded key.
-func HandleStream(s libp2pnet.Stream, role string, ds *discovery.DiscoveryService) {
+// ctx is passed from main so that all downstream operations (DHT queries, stream opens)
+// respect the application shutdown signal and do not leak goroutines.
+func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *discovery.DiscoveryService) {
 	log.Printf("Incoming stream from %s (local role: %s)", s.Conn().RemotePeer(), role)
 	defer s.Close()
 
-	// Read the first line using a byte-by-byte approach to avoid over-buffering.
-	// If we used bufio.NewReader, it would pre-fetch data past the text lines
-	// and into the raw ECDH key bytes, causing decryption failures.
+	// Read the first line one byte at a time to avoid over-buffering.
+	// Using bufio.NewReader would pre-fetch bytes past the text lines and into
+	// the raw ECDH key bytes, causing decryption failures.
 	firstLine, err := readLineRaw(s)
 	if err != nil {
 		log.Printf("Handler: failed to read first line: %v", err)
@@ -40,19 +41,18 @@ func HandleStream(s libp2pnet.Stream, role string, ds *discovery.DiscoveryServic
 		return
 	}
 
-	if firstLine == "RELAY" {
-		// I-3 / Bug 4 Fix: "RELAY" keyword means the entry node wants us to forward
-		// this circuit to an exit node on its behalf. Read the target and bridge.
+	if firstLine == config.RelayHeader {
+		// config.RelayHeader means the entry node wants us to forward this circuit to an exit.
 		targetAddr, err := readLineRaw(s)
 		if err != nil {
 			log.Printf("Handler: failed to read target address for relay: %v", err)
 			s.Reset()
 			return
 		}
-		handleRelay(s, ds, targetAddr)
+		handleRelay(ctx, s, ds, targetAddr)
 	} else {
-		// No "RELAY" prefix — firstLine is the target address directly.
-		// This is either a direct Entry→Exit connection, or traffic from a relay to an exit.
+		// No RelayHeader prefix — firstLine is the target address directly.
+		// This is either a direct Entry→Exit connection, or traffic arriving from a relay.
 		handleExit(s, firstLine)
 	}
 }
@@ -60,17 +60,15 @@ func HandleStream(s libp2pnet.Stream, role string, ds *discovery.DiscoveryServic
 // handleRelay implements the relay node's forwarding logic.
 //
 // Flow:
-//  1. ECDH handshake with the upstream (entry) connection — get entryKey
-//  2. Find an available exit node from the DHT
+//  1. ECDH handshake with the upstream (entry) — derive entryKey
+//  2. Find a random exit node from the DHT (uses ctx, not context.Background)
 //  3. Open a stream to the exit node and send the target address
-//  4. ECDH handshake with the downstream (exit) connection — get exitKey
-//  5. Bridge the two tunnels bidirectionally:
-//     upstream (encrypted with entryKey) ↔ downstream (encrypted with exitKey)
+//  4. ECDH handshake with the downstream (exit) — derive exitKey
+//  5. Bridge the two encrypted tunnels bidirectionally
 //
 // The relay sees only encrypted traffic at each layer. It decrypts Entry→Relay
-// traffic with entryKey and re-encrypts with exitKey before sending to Exit.
-// This achieves independent per-hop encryption (layered security).
-func handleRelay(s libp2pnet.Stream, ds *discovery.DiscoveryService, targetAddr string) {
+// traffic with entryKey and re-encrypts with exitKey before forwarding to Exit.
+func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.DiscoveryService, targetAddr string) {
 	log.Printf("Relay: building circuit for %s", targetAddr)
 
 	// Step 1: ECDH with the entry node.
@@ -82,26 +80,29 @@ func handleRelay(s libp2pnet.Stream, ds *discovery.DiscoveryService, targetAddr 
 		return
 	}
 
-	// Step 2: Find an exit node from the DHT
-	exits, err := ds.FindPeers(context.Background(), "shadowlink-exit")
+	// Step 2: Find an exit node from the DHT.
+	// Uses the passed ctx so shutdown cancels this cleanly.
+	exits, err := ds.FindPeers(ctx, config.RendezvousExit)
 	if err != nil || len(exits) == 0 {
 		log.Printf("Relay: no exit nodes available: %v", err)
 		s.Reset()
 		return
 	}
 
-	// Step 3: Connect to an exit node and establish the downstream stream
+	// Step 3: Connect to an exit node and open a downstream stream.
+	// connErr and streamErr use distinct names to avoid shadowing the outer err variable.
 	var exitStream libp2pnet.Stream
 	for _, exit := range exits {
-		if err := ds.Host.Connect(context.Background(), exit); err != nil {
-			log.Printf("Relay: failed to reach exit %s: %v", exit.ID, err)
+		if connErr := ds.Host.Connect(ctx, exit); connErr != nil {
+			log.Printf("Relay: failed to reach exit %s: %v", exit.ID, connErr)
 			continue
 		}
-		exitStream, err = ds.Host.NewStream(context.Background(), exit.ID, ProtocolID)
-		if err != nil {
-			log.Printf("Relay: failed to open stream to exit %s: %v", exit.ID, err)
+		stream, streamErr := ds.Host.NewStream(ctx, exit.ID, config.ProtocolID)
+		if streamErr != nil {
+			log.Printf("Relay: failed to open stream to exit %s: %v", exit.ID, streamErr)
 			continue
 		}
+		exitStream = stream
 		log.Printf("Relay: connected to exit %s", exit.ID)
 		break
 	}
@@ -113,7 +114,7 @@ func handleRelay(s libp2pnet.Stream, ds *discovery.DiscoveryService, targetAddr 
 	}
 	defer exitStream.Close()
 
-	// Step 4: Send target address to the exit node (no "RELAY" prefix — exit handles directly)
+	// Step 4: Send target address to the exit node (no RelayHeader — exit handles directly).
 	if _, err := fmt.Fprintf(exitStream, "%s\n", targetAddr); err != nil {
 		log.Printf("Relay: failed to send target addr to exit: %v", err)
 		s.Reset()
@@ -129,35 +130,19 @@ func handleRelay(s libp2pnet.Stream, ds *discovery.DiscoveryService, targetAddr 
 		return
 	}
 
-	// Step 6: Create encrypted connection wrappers for each hop
+	// Step 6: Create encrypted connection wrappers for each hop.
 	upstreamConn := &libP2PConn{Stream: s, Keys: [][]byte{entryKey}}
 	downstreamConn := &libP2PConn{Stream: exitStream, Keys: [][]byte{exitKey}}
-
-	log.Printf("Relay: circuit active for %s (entryKey and exitKey are independent)", targetAddr)
+	log.Printf("Relay: circuit active for %s (independent per-hop ECDH-HKDF keys)", targetAddr)
 
 	// Step 7: Bridge the two tunnels bidirectionally.
-	// Data from entry is decrypted with entryKey, then re-encrypted with exitKey toward exit.
-	// Data from exit is decrypted with exitKey, then re-encrypted with entryKey toward entry.
-	errc := make(chan error, 2)
-	go func() {
-		_, err := io.Copy(downstreamConn, upstreamConn)
-		errc <- err
-	}()
-	go func() {
-		_, err := io.Copy(upstreamConn, downstreamConn)
-		errc <- err
-	}()
-
-	// Wait for either side to close (normal on disconnect)
-	if err := <-errc; err != nil {
-		log.Printf("Relay: circuit closed: %v", err)
-	}
+	bridge(upstreamConn, downstreamConn)
 }
 
 // handleExit implements the exit node's forwarding logic.
 //
 // Flow:
-//  1. ECDH handshake with upstream (relay or entry) — get sessionKey
+//  1. ECDH handshake with upstream (relay or entry) — derive sessionKey
 //  2. Dial the target address on the public internet
 //  3. Proxy cleartext internet traffic ↔ encrypted dVPN traffic
 func handleExit(s libp2pnet.Stream, targetAddr string) {
@@ -172,7 +157,7 @@ func handleExit(s libp2pnet.Stream, targetAddr string) {
 		return
 	}
 
-	// Dial the real target on the internet
+	// Dial the real target on the public internet.
 	outConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
 		log.Printf("Exit Node: failed to dial %s: %v", targetAddr, err)
@@ -181,26 +166,27 @@ func handleExit(s libp2pnet.Stream, targetAddr string) {
 	}
 	defer outConn.Close()
 
-	// Create encrypted wrapper using the per-session ECDH key
+	// Create the encrypted dVPN tunnel wrapper using the per-session ECDH-HKDF key.
 	wrapper := &libP2PConn{Stream: s, Keys: [][]byte{sessionKey}}
-
 	log.Printf("Exit Node: circuit active for %s", targetAddr)
 
-	// Proxy: cleartext internet ↔ encrypted dVPN tunnel
-	errc := make(chan error, 2)
-	go func() {
-		// Receive encrypted data from dVPN, decrypt, send to internet
-		_, err := io.Copy(outConn, wrapper)
-		errc <- err
-	}()
-	go func() {
-		// Receive data from internet, encrypt, send back through dVPN
-		_, err := io.Copy(wrapper, outConn)
-		errc <- err
-	}()
+	bridge(wrapper, outConn)
+}
 
+// bridge proxies data bidirectionally between two net.Conn connections.
+// It launches two goroutines and waits for either direction to close.
+func bridge(a, b net.Conn) {
+	errc := make(chan error, 2)
+	copyDir := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		errc <- err
+	}
+	go copyDir(b, a)
+	go copyDir(a, b)
+
+	// Wait for either direction to close (normal on disconnect).
 	if err := <-errc; err != nil {
-		log.Printf("Exit Node: circuit closed: %v", err)
+		log.Printf("Bridge: circuit closed: %v", err)
 	}
 }
 

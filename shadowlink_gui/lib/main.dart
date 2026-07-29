@@ -7,7 +7,7 @@ void main() {
 }
 
 class ShadowLinkApp extends StatelessWidget {
-  const ShadowLinkApp({Key? key}) : super(key: key);
+  const ShadowLinkApp({super.key});
 
   @override
   Widget build(BuildContext context) {

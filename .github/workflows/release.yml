@@ -6,9 +6,19 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# ─── Shared version pins ────────────────────────────────────────────────────
+# Change these once to update all jobs simultaneously.
+env:
+  GO_VERSION: '1.21'
+  FLUTTER_CHANNEL: 'stable'
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'zulu'
+  RUBY_VERSION: '3.0'
+
 jobs:
-  build-headless:
-    name: Build Go Headless Binaries
+  # ─── Go tests ─────────────────────────────────────────────────────────────
+  test-go:
+    name: Run Go Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -17,7 +27,24 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run Tests
+        run: go test ./... -race -count=1
+
+  # ─── Headless binaries ────────────────────────────────────────────────────
+  build-headless:
+    name: Build Go Headless Binaries
+    runs-on: ubuntu-latest
+    needs: test-go
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Build Windows Headless
         env:
@@ -49,9 +76,11 @@ jobs:
           name: headless-binaries
           path: release/shadowlink-*
 
+  # ─── Windows GUI ──────────────────────────────────────────────────────────
   build-gui-windows:
     name: Build Flutter GUI (Windows)
     runs-on: windows-latest
+    needs: test-go
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -59,7 +88,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: ${{ env.FLUTTER_CHANNEL }}
 
       - name: Install dependencies
         working-directory: ./shadowlink_gui
@@ -79,9 +108,11 @@ jobs:
           name: gui-windows
           path: release/shadowlink-gui-windows-x64.zip
 
+  # ─── Android APK ──────────────────────────────────────────────────────────
   build-gui-android:
     name: Build Flutter GUI (Android)
     runs-on: ubuntu-latest
+    needs: test-go
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -89,18 +120,18 @@ jobs:
       - name: Setup Java
         uses: actions/setup-java@v3
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: ${{ env.GO_VERSION }}
 
-      - name: Setup gomobile
+      - name: Install gomobile
         run: |
-          go get -tool golang.org/x/mobile/cmd/gobind
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           gomobile init
 
       - name: Build Android AAR (gomobile)
@@ -111,7 +142,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: ${{ env.FLUTTER_CHANNEL }}
 
       - name: Install dependencies
         working-directory: ./shadowlink_gui
@@ -121,7 +152,7 @@ jobs:
         working-directory: ./shadowlink_gui
         run: flutter build apk --release
 
-      - name: Copy APK to release
+      - name: Stage APK
         run: |
           mkdir -p release
           cp shadowlink_gui/build/app/outputs/flutter-apk/app-release.apk release/shadowlink-android.apk
@@ -132,9 +163,11 @@ jobs:
           name: gui-android
           path: release/shadowlink-android.apk
 
+  # ─── iOS IPA ──────────────────────────────────────────────────────────────
   build-gui-ios:
     name: Build Flutter GUI (iOS)
     runs-on: macos-latest
+    needs: test-go
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -142,23 +175,24 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: ${{ env.GO_VERSION }}
 
-      - name: Setup gomobile
+      - name: Install gomobile
         run: |
-          go get -tool golang.org/x/mobile/cmd/gobind
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           gomobile init
 
       - name: Build iOS XCFramework (gomobile)
         run: |
           gomobile bind -v -target=ios,iossimulator -o shadowlink_gui/ios/Mobile.xcframework ./mobile
 
-      - name: Setup Ruby and Xcodeproj
+      - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.0'
+          ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: true
+
       - name: Embed XCFramework in Xcode Project
         run: |
           gem install xcodeproj
@@ -169,12 +203,14 @@ jobs:
           target = project.targets.first
           framework_group = project.main_group.find_subpath('Frameworks', true)
           file_ref = framework_group.new_reference('../Mobile.xcframework')
-          
+
           # Add to Frameworks Build Phase
           target.frameworks_build_phase.add_file_reference(file_ref, true)
-          
+
           # Add to Embed Frameworks Build Phase
-          embed_phase = target.build_phases.find { |p| p.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && p.name == 'Embed Frameworks' }
+          embed_phase = target.build_phases.find { |p|
+            p.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && p.name == 'Embed Frameworks'
+          }
           if embed_phase.nil?
             embed_phase = project.new(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase)
             embed_phase.name = 'Embed Frameworks'
@@ -183,20 +219,20 @@ jobs:
           end
           build_file = embed_phase.add_file_reference(file_ref, true)
           build_file.settings = { 'ATTRIBUTES' => ['CodeSignOnCopy', 'RemoveHeadersOnCopy'] }
-          
+
           project.save
           "
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: ${{ env.FLUTTER_CHANNEL }}
 
       - name: Install dependencies
         working-directory: ./shadowlink_gui
         run: flutter pub get
 
-      - name: Build iOS App
+      - name: Build iOS App (no codesign)
         working-directory: ./shadowlink_gui
         run: flutter build ios --release --no-codesign
 
@@ -214,17 +250,20 @@ jobs:
           name: gui-ios
           path: release/shadowlink-ios.ipa
 
+  # ─── GitHub Release ───────────────────────────────────────────────────────
   create-release:
     name: Create GitHub Release
     needs: [build-headless, build-gui-windows, build-gui-android, build-gui-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Only publish a real release on tag pushes; skip on workflow_dispatch.
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Download Artifacts
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts

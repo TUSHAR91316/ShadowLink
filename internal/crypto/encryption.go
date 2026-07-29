@@ -65,6 +65,9 @@ func Decrypt(key, encrypted []byte) ([]byte, error) {
 }
 
 // GenerateKey generates a random 32-byte key for ChaCha20-Poly1305.
+// This is primarily used in tests and for one-off symmetric encryption.
+// ECDH session keys are derived automatically by PerformECDH / RespondECDH
+// and should NOT be generated with this function.
 func GenerateKey() ([]byte, error) {
 	key := make([]byte, chacha20poly1305.KeySize)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
@@ -72,3 +75,4 @@ func GenerateKey() ([]byte, error) {
 	}
 	return key, nil
 }
+
