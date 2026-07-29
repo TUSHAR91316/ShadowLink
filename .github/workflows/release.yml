@@ -9,7 +9,7 @@ on:
 # ─── Shared version pins ────────────────────────────────────────────────────
 # Change these once to update all jobs simultaneously.
 env:
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.22'
   FLUTTER_CHANNEL: 'stable'
   JAVA_VERSION: '17'
   JAVA_DISTRIBUTION: 'zulu'
