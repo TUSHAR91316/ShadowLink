@@ -138,7 +138,7 @@ jobs:
       - name: Build Android AAR (gomobile)
         run: |
           mkdir -p shadowlink_gui/android/app/libs
-          gomobile bind -v -target=android -o shadowlink_gui/android/app/libs/mobile.aar ./mobile
+          gomobile bind -v -target=android -androidapi 21 -o shadowlink_gui/android/app/libs/mobile.aar ./mobile
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -203,7 +203,7 @@ jobs:
           project = Xcodeproj::Project.open(project_path)
           target = project.targets.first
           framework_group = project.main_group.find_subpath('Frameworks', true)
-          file_ref = framework_group.new_reference('../Mobile.xcframework')
+          file_ref = framework_group.new_reference('Mobile.xcframework')
 
           # Add to Frameworks Build Phase
           target.frameworks_build_phase.add_file_reference(file_ref, true)
