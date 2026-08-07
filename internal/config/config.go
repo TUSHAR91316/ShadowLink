@@ -10,11 +10,13 @@ import "time"
 // Changing this is a breaking protocol change — all nodes must agree on the same value.
 const ProtocolID = "/shadowlink/1.0.0"
 
-// RelayHeader is the sentinel string written by an entry node to signal
-// that the receiving relay should forward the stream to an exit node.
-const RelayHeader = "RELAY"
+// ExtendHeader is the sentinel string written to a relay node, followed by the target exit node PeerID.
+const ExtendHeader = "EXTEND"
 
-// RenameRendezvousRelay is the DHT rendezvous key used by relay nodes to announce themselves.
+// ConnectHeader is the sentinel string written to an exit node, followed by the target internet address.
+const ConnectHeader = "CONNECT"
+
+// RendezvousRelay is the DHT rendezvous key used by relay nodes to announce themselves.
 const RendezvousRelay = "shadowlink-relay"
 
 // RendezvousExit is the DHT rendezvous key used by exit nodes to announce themselves.

@@ -9,7 +9,7 @@ import (
 	"net"
 	"context"
 
-	"github.com/libp2p/go-libp2p/core/network"
+	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/shadowlink/core/internal/config"
 	"github.com/shadowlink/core/internal/crypto"
@@ -44,7 +44,7 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 	if len(relays) > 0 {
 		rand.Shuffle(len(relays), func(i, j int) { relays[i], relays[j] = relays[j], relays[i] })
 		log.Printf("Found %d relay(s) and %d exit(s) — attempting 3-hop circuit", len(relays), len(exits))
-		conn, err := dialViaRelay(ctx, ds, relays, targetAddr)
+		conn, err := dialViaRelay(ctx, ds, relays, exits, targetAddr)
 		if err == nil {
 			return conn, nil
 		}
@@ -58,31 +58,28 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 }
 
 // dialViaRelay attempts a 3-hop circuit through available relay nodes.
-// Tries each relay in order until one succeeds or all are exhausted.
-func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays []peer.AddrInfo, targetAddr string) (net.Conn, error) {
+func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, relay := range relays {
-		conn, err := tryViaRelay(ctx, ds, relay, targetAddr)
-		if err != nil {
-			log.Printf("Relay %s failed: %v, trying next...", relay.ID, err)
-			lastErr = err
-			continue
+		for _, exit := range exits {
+			if relay.ID == exit.ID {
+				continue // Avoid using the same node as both relay and exit
+			}
+			conn, err := tryViaRelay(ctx, ds, relay, exit, targetAddr)
+			if err != nil {
+				log.Printf("Relay %s -> Exit %s failed: %v", relay.ID, exit.ID, err)
+				lastErr = err
+				continue
+			}
+			log.Printf("3-hop circuit established: Entry -> %s -> %s -> Target", relay.ID, exit.ID)
+			return conn, nil
 		}
-		log.Printf("3-hop circuit established via relay %s", relay.ID)
-		return conn, nil
 	}
-	return nil, fmt.Errorf("all %d relay(s) failed: %v", len(relays), lastErr)
+	return nil, fmt.Errorf("all relay/exit combinations failed: %v", lastErr)
 }
 
-// tryViaRelay connects to a specific relay and negotiates the circuit.
-//
-// Protocol:
-//  1. Open a libp2p stream to the relay
-//  2. Write config.RelayHeader + "\n", then the target address + "\n"
-//  3. Perform X25519 ECDH as the initiator (send public key first)
-//  4. Relay independently connects to an exit node and bridges the tunnel
-//  5. Return a libP2PConn encrypted with the per-session ECDH-HKDF key
-func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay peer.AddrInfo, targetAddr string) (net.Conn, error) {
+// tryViaRelay connects to a relay, extends to an exit, and negotiates keys with both.
+func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exit peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, relay); err != nil {
 		return nil, fmt.Errorf("connect to relay: %v", err)
 	}
@@ -90,24 +87,43 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay peer
 	if err != nil {
 		return nil, fmt.Errorf("open stream to relay: %v", err)
 	}
+	cleanup := true
+	defer func() {
+		if cleanup && stream != nil {
+			stream.Reset()
+		}
+	}()
 
-	// Signal relay mode and provide the target address.
-	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.RelayHeader, targetAddr); err != nil {
-		stream.Reset()
-		return nil, fmt.Errorf("write relay header: %v", err)
+	// Signal EXTEND mode and provide the exit peer ID.
+	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.ExtendHeader, exit.ID.String()); err != nil {
+		return nil, fmt.Errorf("write extend header: %v", err)
 	}
 
-	// ECDH key exchange — initiator sends its public key first.
-	sessionKey, err := crypto.PerformECDH(stream)
+	// ECDH with relay — initiator sends its public key first.
+	relayKey, err := crypto.PerformECDH(stream)
 	if err != nil {
-		stream.Reset()
 		return nil, fmt.Errorf("ECDH with relay: %v", err)
 	}
 
-	return &libP2PConn{Stream: stream, Keys: [][]byte{sessionKey}}, nil
+	relayConn := &libP2PConn{Conn: streamAdapter{stream}, Keys: [][]byte{relayKey}}
+
+	// Connect to Exit through Relay
+	if _, err := fmt.Fprintf(relayConn, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
+		return nil, fmt.Errorf("write connect header: %v", err)
+	}
+
+	// ECDH with Exit (through the relay proxy)
+	exitKey, err := crypto.PerformECDH(relayConn)
+	if err != nil {
+		return nil, fmt.Errorf("ECDH with exit: %v", err)
+	}
+
+	exitConn := &libP2PConn{Conn: relayConn, Keys: [][]byte{exitKey}}
+	cleanup = false
+	return exitConn, nil
 }
 
-// dialDirect builds a 1-hop Entry→Exit circuit (fallback when no relays are available).
+// dialDirect builds a 1-hop Entry→Exit circuit.
 func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, exitNode := range exits {
@@ -124,12 +140,6 @@ func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []pee
 }
 
 // tryDirect attempts a direct Entry→Exit stream.
-//
-// Protocol:
-//  1. Open a libp2p stream to the exit node
-//  2. Write the target address (no config.RelayHeader prefix — exit detects direct mode)
-//  3. Perform X25519 ECDH as the initiator
-//  4. Return a libP2PConn encrypted with the per-session ECDH-HKDF key
 func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, exitNode); err != nil {
 		return nil, fmt.Errorf("connect to exit: %v", err)
@@ -138,30 +148,42 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 	if err != nil {
 		return nil, fmt.Errorf("open stream to exit: %v", err)
 	}
+	cleanup := true
+	defer func() {
+		if cleanup && stream != nil {
+			stream.Reset()
+		}
+	}()
 
-	// Write target address — no RelayHeader signals direct exit mode.
-	if _, err := fmt.Fprintf(stream, "%s\n", targetAddr); err != nil {
-		stream.Reset()
+	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
 		return nil, fmt.Errorf("write target addr: %v", err)
 	}
 
-	// ECDH key exchange — initiator sends its public key first.
 	sessionKey, err := crypto.PerformECDH(stream)
 	if err != nil {
-		stream.Reset()
 		return nil, fmt.Errorf("ECDH with exit: %v", err)
 	}
 
-	return &libP2PConn{Stream: stream, Keys: [][]byte{sessionKey}}, nil
+	cleanup = false
+	return &libP2PConn{Conn: streamAdapter{stream}, Keys: [][]byte{sessionKey}}, nil
 }
 
-// libP2PConn wraps a libp2p network.Stream to implement net.Conn.
-// All traffic is encrypted with the per-session ECDH-HKDF key and framed
-// with a 4-byte big-endian length prefix for reliable stream parsing.
+// streamAdapter adapts a libp2p network.Stream to the net.Conn interface.
+type streamAdapter struct {
+	libp2pnet.Stream
+}
+
+func (s streamAdapter) LocalAddr() net.Addr  { return &net.TCPAddr{} }
+func (s streamAdapter) RemoteAddr() net.Addr { return &net.TCPAddr{} }
+
+// libP2PConn wraps a net.Conn to provide multi-layered encryption/decryption (Onion Routing)
+// and frame sizing.
 type libP2PConn struct {
-	network.Stream
-	Keys    [][]byte
-	readBuf []byte
+	net.Conn
+	Keys     [][]byte
+	readBuf  []byte
+	frameBuf []byte // reusable buffer to avoid allocations
+	lenBuf   [4]byte
 }
 
 func (c *libP2PConn) Read(b []byte) (int, error) {
@@ -173,40 +195,47 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 	}
 
 	// Step 1: Read the 4-byte big-endian frame length.
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(c.Stream, lenBuf); err != nil {
+	if _, err := io.ReadFull(c.Conn, c.lenBuf[:]); err != nil {
 		return 0, err
 	}
-	frameLen := binary.BigEndian.Uint32(lenBuf)
+	frameLen := binary.BigEndian.Uint32(c.lenBuf[:])
 
 	// Security: enforce max frame size (from config) to prevent OOM DoS.
 	if frameLen > config.MaxFrameSize {
 		return 0, fmt.Errorf("frame length %d exceeds max frame size %d", frameLen, config.MaxFrameSize)
 	}
 
-	// Step 2: Read exactly frameLen bytes (the complete encrypted frame).
-	frame := make([]byte, frameLen)
-	if _, err := io.ReadFull(c.Stream, frame); err != nil {
+	// Step 2: Read exactly frameLen bytes. Reuse frameBuf to avoid allocations.
+	if uint32(cap(c.frameBuf)) < frameLen {
+		c.frameBuf = make([]byte, frameLen)
+	}
+	frame := c.frameBuf[:frameLen]
+	if _, err := io.ReadFull(c.Conn, frame); err != nil {
 		return 0, err
 	}
 
-	// Step 3: Decrypt the full frame using the per-session key.
-	plaintext, err := onion.UnwrapPayload(frame, c.Keys[0])
-	if err != nil {
-		return 0, fmt.Errorf("decryption failed: %v", err)
+	// Step 3: Decrypt the full frame using the per-session keys (Onion Unwrap).
+	plaintext := frame
+	var err error
+	for _, key := range c.Keys {
+		plaintext, err = onion.UnwrapPayload(plaintext, key)
+		if err != nil {
+			return 0, fmt.Errorf("decryption failed: %v", err)
+		}
 	}
 
 	// Step 4: Copy plaintext into the caller's buffer, saving any remainder.
 	n := copy(b, plaintext)
 	if n < len(plaintext) {
-		c.readBuf = plaintext[n:]
+		// Allocate a new buffer for the remainder, since plaintext shares memory with frameBuf
+		c.readBuf = make([]byte, len(plaintext)-n)
+		copy(c.readBuf, plaintext[n:])
 	}
 
 	return n, nil
 }
 
-// Write encrypts the payload with the per-session key and prepends a 4-byte length header.
-// The matching length prefix ensures the reader always consumes exactly one complete frame.
+// Write encrypts the payload with the per-session keys and prepends a 4-byte length header.
 func (c *libP2PConn) Write(b []byte) (int, error) {
 	ciphertext, err := onion.WrapPayload(b, c.Keys)
 	if err != nil {
@@ -214,22 +243,15 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 	}
 
 	// Prepend 4-byte big-endian length header.
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(ciphertext)))
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
 
-	if _, err := c.Stream.Write(lenBuf); err != nil {
+	if _, err := c.Conn.Write(lenBuf[:]); err != nil {
 		return 0, err
 	}
-	if _, err := c.Stream.Write(ciphertext); err != nil {
+	if _, err := c.Conn.Write(ciphertext); err != nil {
 		return 0, err
 	}
 	// Return the plaintext length to satisfy the net.Conn contract.
 	return len(b), nil
 }
-
-// LocalAddr returns a placeholder address. libp2p streams are not TCP connections;
-// callers that require real addresses should use the libp2p host API directly.
-func (c *libP2PConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
-
-// RemoteAddr returns a placeholder address. See LocalAddr for the same caveat.
-func (c *libP2PConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }

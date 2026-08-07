@@ -60,8 +60,8 @@ func makeLibP2PConnPair(t *testing.T) (*libP2PConn, *libP2PConn) {
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	return &libP2PConn{Stream: s1, Keys: [][]byte{key}},
-		&libP2PConn{Stream: s2, Keys: [][]byte{key}}
+	return &libP2PConn{Conn: streamAdapter{s1}, Keys: [][]byte{key}},
+		&libP2PConn{Conn: streamAdapter{s2}, Keys: [][]byte{key}}
 }
 
 // TestFraming_RoundTrip verifies encrypt→frame→transmit→deframe→decrypt works end-to-end.
@@ -133,8 +133,8 @@ func TestFraming_WrongKeyFails(t *testing.T) {
 	rightKey, _ := crypto.GenerateKey()
 	wrongKey, _ := crypto.GenerateKey()
 
-	writer := &libP2PConn{Stream: s1, Keys: [][]byte{rightKey}}
-	reader := &libP2PConn{Stream: s2, Keys: [][]byte{wrongKey}}
+	writer := &libP2PConn{Conn: streamAdapter{s1}, Keys: [][]byte{rightKey}}
+	reader := &libP2PConn{Conn: streamAdapter{s2}, Keys: [][]byte{wrongKey}}
 
 	done := make(chan error, 1)
 	go func() {
