@@ -1,95 +1,197 @@
-# ShadowLink - Decentralized Onion-Routed VPN
+# 🛡️ ShadowLink — Decentralized Onion-Routed VPN
 
-[![Version](https://img.shields.io/badge/version-2.0.0--alpha-blue.svg)](https://github.com/TUSHAR91316/ShadowLink)
-[![Go](https://img.shields.io/badge/go-1.21+-blue.svg)](https://golang.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.0.3--alpha-00ffff?style=for-the-badge&logo=shield&logoColor=black)](https://github.com/TUSHAR91316/ShadowLink)
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://golang.org/)
+[![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?style=for-the-badge&logo=flutter&logoColor=white)](https://flutter.dev/)
+[![License](https://img.shields.io/badge/license-MIT-00ff88?style=for-the-badge)](LICENSE)
+[![DHT Protocol](https://img.shields.io/badge/P2P-libp2p%20Kad--DHT-blueviolet?style=for-the-badge)](https://libp2p.io/)
+[![Cryptography](https://img.shields.io/badge/Crypto-XChaCha20--Poly1305%20%7C%20X25519-ff007f?style=for-the-badge)](internal/crypto/)
 
-> **LEGAL DISCLAIMER:** ShadowLink is a decentralized, peer-to-peer open-source protocol. The developers operate **no infrastructure**, have **no control** over the network, and assume **zero liability** for any damages or legal repercussions caused by end-users. By downloading or using this software, you agree to the strict terms outlined in the [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md). You assume 100% of the legal risk.
+> **⚠️ LEGAL DISCLAIMER:** ShadowLink is an open-source, peer-to-peer decentralized network routing utility. The developers operate **zero central infrastructure**, maintain **no servers**, and possess **no cryptographic capability** to monitor, inspect, or intercept network traffic. By downloading, compiling, or using this software, you agree to the terms in [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md) and assume 100% of all legal liability.
 
-ShadowLink is a next-generation **Decentralized VPN (dVPN)** built in Go. Moving away from traditional client-server architectures, ShadowLink utilizes **Multi-hop Onion Routing** and a **Distributed Hash Table (DHT)** to provide a completely serverless, highly secure, and untraceable network tunnel. 
+---
 
-## 🚀 Key Features
+## 🌟 What is ShadowLink?
 
-### 🔒 Security & Privacy (Onion Routing)
-- **Multi-Hop Architecture**: Traffic bounces through Entry, Relay, and Exit nodes (3-hop routing). No single node knows both your IP and your destination, protecting you from tracking.
-- **Perfect Forward Secrecy**: Ephemeral X25519 ECDH key exchange generates a unique session key for every single connection.
-- **XChaCha20-Poly1305 AEAD**: State-of-the-art authenticated encryption with random nonces ensures robust security against tampering and replay attacks.
-- **DPI Evasion**: Multi-layered encryption with 4-byte length-prefix framing prevents Deep Packet Inspection from identifying traffic type.
+ShadowLink is a next-generation **Decentralized VPN (dVPN)** engineered in Go and paired with a high-performance Flutter interface. Moving completely away from centralized server models that store logs and expose single points of failure, ShadowLink employs **Multi-Hop Layered Onion Routing** over a serverless **Kademlia Distributed Hash Table (DHT)**.
 
-### 🌐 Decentralized Networking (DHT)
-- **Serverless Node Discovery**: Uses `libp2p` Kademlia DHT to find available nodes on the network dynamically. No central tracking servers to shut down.
-- **Community Driven**: Purely free network. Anyone can run an Entry, Relay, or Exit node to contribute bandwidth.
+Every connection is dynamically routed through independent community volunteer nodes, with nested end-to-end cryptographic encapsulation ensuring that **no single node ever learns both who you are and where you are going**.
 
-### 💻 Cross-Platform & Mobile Ready
-- **Go Backend**: Extremely fast, memory-safe, and highly concurrent networking.
-- **Flutter Desktop GUI**: A beautiful, modern "cyber" aesthetic interface to manage your daemon connection and node roles.
-- **Universal Support**: Compiles natively to Windows, macOS, Linux, and can be ported to iOS/Android via `gomobile`.
-- **System-Wide Proxy**: Built-in OS proxy configuration (SOCKS5).
+---
 
-## 📦 Installation & Setup
+## ✨ Key Architectural Highlights
+
+```
+┌──────────────┐     EXTEND      ┌──────────────┐     CONNECT     ┌──────────────┐     TCP      ┌──────────────┐
+│  Entry Node  │ ──────────────> │  Relay Node  │ ──────────────> │  Exit Node   │ ───────────> │ Target Host  │
+│ (Your Client)│ [Outer: RelayK] │ (Blind Hop)  │ [Inner: ExitK]  │ (Egress Hop) │ (Cleartext)  │ (Internet)   │
+└──────────────┘                 └──────────────┘                 └──────────────┘              └──────────────┘
+```
+
+### 🔒 True Multi-Hop Onion Routing
+- **End-to-End Cryptographic Encapsulation**: Payloads are multi-layer encrypted. Relay nodes only peel their outer layer (`relayKey`) and forward raw inner ciphertext without ever accessing plaintext application data.
+- **Perfect Forward Secrecy (PFS)**: Ephemeral X25519 Elliptic-Curve Diffie-Hellman (ECDH) key exchanges generate distinct session keys derived via **HKDF-SHA256** for every circuit.
+- **Munitions-Grade Encryption**: Powered by **XChaCha20-Poly1305 AEAD** with 24-byte random nonces, providing quantum-resistant authenticated encryption against tampering, replay, and active MITM attacks.
+- **Deep Packet Inspection (DPI) Resistance**: Structured 4-byte big-endian framed packet streams prevent signature matching and protocol fingerprinting.
+
+### 🌐 Serverless Peer Discovery (libp2p Kad-DHT)
+- **Zero Central Trackers**: Node discovery occurs dynamically via the Kademlia DHT. Nodes announce themselves under rendezvous strings (`shadowlink-relay`, `shadowlink-exit`) and find peers peer-to-peer.
+- **Autonomous Bootstrapping**: Automatically connects to decentralized IPFS/libp2p bootstrap nodes on launch.
+
+### ⚡ High-Throughput & Zero-Allocation Engine
+- **Memory Optimization**: Employs reusable frame buffers within `libP2PConn` to eliminate Garbage Collection (GC) thrashing during multi-megabyte transfers.
+- **Context-Aware Lifecycle**: All network dials, stream bridges, and discovery calls propagate contexts to guarantee zero Goroutine resource leaks upon disconnection.
+
+### 📱 Unified Cross-Platform Support
+- **Desktop**: Native headless daemon and Flutter desktop GUI for Windows, macOS (Intel & Apple Silicon), and Linux.
+- **Mobile**: Native static libraries (`mobile.aar` for Android and `Mobile.xcframework` for iOS) generated via `gomobile` with battery-optimized opportunistic discovery.
+
+---
+
+## 📁 Repository Structure
+
+```
+ShadowLink/
+├── cmd/
+│   └── shadowlink/            # CLI daemon entrypoint & signal handling
+├── internal/
+│   ├── config/                # Centralized protocol constants & port defaults
+│   ├── crypto/                # X25519 ECDH, HKDF-SHA256 & XChaCha20-Poly1305
+│   ├── discovery/             # libp2p host lifecycle & Kademlia DHT routing
+│   ├── network/               # Onion circuit builder, framing, stream handlers & bridge
+│   ├── onion/                 # Multi-layered payload wrap/unwrap primitives
+│   ├── socks5/                # Local SOCKS5 proxy server with custom onion dialer
+│   └── sysproxy/              # OS-level proxy automation (Windows Registry & POSIX stubs)
+├── mobile/                    # gomobile export bindings (MobileNode for Swift/Kotlin)
+├── shadowlink_gui/            # Flutter desktop & mobile UI (Cyber Aesthetic)
+├── release/                   # Pre-compiled multi-platform release binaries
+├── docs/                      # Technical deep-dive documentation & release history
+└── .github/workflows/         # CI/CD cross-compilation matrix (Go, Flutter, gomobile)
+```
+
+---
+
+## 🚀 Quick Start & Installation
 
 ### Prerequisites
-- **Go 1.21+** (for building from source)
-- **Git**
+- **Go**: Version 1.22 or higher ([Download Go](https://go.dev/dl/))
+- **Flutter**: Version 3.10+ (for building the GUI)
+- **Git**: For cloning the repository
 
-### 1. Install & Build
-### 1. Build the Go Daemon
+### 1. Clone & Build the Go Daemon
+
 ```bash
 git clone https://github.com/TUSHAR91316/ShadowLink.git
 cd ShadowLink
 
-# Download dependencies
+# Download & verify Go module dependencies
 go mod tidy
 
-# Build the binary
-go build -o release/shadowlink-windows-x64.exe ./cmd/shadowlink
+# Build native binary
+go build -o shadowlink ./cmd/shadowlink
 ```
 
-### 2. Run the Flutter GUI
+### 2. Run the CLI Daemon
+
+ShadowLink functions as a modular node. You can run client and routing roles concurrently:
+
+#### 🔹 Client Mode (Entry Node + System Proxy)
+Starts a local SOCKS5 proxy on `127.0.0.1:1080` and configures your OS to route traffic through the dVPN:
 ```bash
-cd shadowlink_gui
-flutter pub get
-flutter run -d windows
-```
-
-### 2. Run ShadowLink
-
-ShadowLink operates as a unified node. You can run it in different roles concurrently using command-line flags.
-
-**Start an Entry Node (Client) with System Proxy:**
-```bash
+# Windows / Linux / macOS
 ./shadowlink --entry --socks 1080 --sysproxy
 ```
-*This starts a local SOCKS5 server on port 1080 and configures your OS to route traffic through it.*
 
-**Start a Relay Node:**
+#### 🔹 Relay Node (Middleman Hop)
+Help power the decentralized network by forwarding encrypted traffic without seeing plaintext:
 ```bash
 ./shadowlink --relay --port 9001
 ```
 
-**Start an Exit Node:**
+#### 🔹 Exit Node (Internet Egress)
+Provide public internet egress for dVPN circuits:
 ```bash
 ./shadowlink --exit --port 9002
 ```
 
-**Run Concurrent Roles:**
+#### 🔹 Combined Node
+Run client and relay operations simultaneously:
 ```bash
-./shadowlink --entry --relay --port 9000
+./shadowlink --entry --relay --port 9000 --socks 1080
 ```
 
-## 🏗️ Architecture Migration (v1.x -> v2.x)
+#### 🔹 Reset System Proxy
+If needed, restore OS network settings immediately:
+```bash
+./shadowlink --reset-proxy
+```
 
-For a complete breakdown of the new Flutter + Go architecture and how the system components interact, please refer to the [ARCHITECTURE.md](ARCHITECTURE.md) diagram and the [developer deep-dive](docs/ARCHITECTURE.md).
+---
 
-ShadowLink has been completely rewritten from Python to **Go** for the backend daemon, and from Electron/React to **Flutter** for the frontend GUI. 
-- **Legacy Code**: The old Python Client-Server architecture (v1) has been archived in the `legacy_python/` directory. Legacy docs remain in `docs/` for historical context.
-- **New Core**: The new architecture embraces P2P networking via `libp2p`, perfect forward secrecy via `crypto/ecdh`, and strict 3-hop circuit routing.
+## 🖥️ Running the Flutter GUI
+
+ShadowLink includes a desktop and mobile GUI styled in a custom **Deep Obsidian & Neon Cyan** palette.
+
+```bash
+cd shadowlink_gui
+
+# Fetch dependencies
+flutter pub get
+
+# Run on your desktop platform
+flutter run -d windows    # On Windows
+flutter run -d macos      # On macOS
+flutter run -d linux      # On Linux
+```
+
+---
+
+## 🛠️ CLI Flag Reference
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--entry` | `bool` | `false` | Run as an Entry client (starts local SOCKS5 proxy) |
+| `--relay` | `bool` | `false` | Run as a Relay node (transits encrypted traffic) |
+| `--exit` | `bool` | `false` | Run as an Exit node (egresses traffic to the internet) |
+| `--port` | `int` | `9000` | Port for incoming P2P libp2p connections (`0` = OS-assigned) |
+| `--socks` | `int` | `1080` | Port for local SOCKS5 proxy listener |
+| `--sysproxy` | `bool` | `false` | Automatically configure OS system proxy (Windows) |
+| `--reset-proxy` | `bool` | `false` | Reset OS system proxy settings and exit immediately |
+
+---
+
+## 🧪 Testing & Verification
+
+ShadowLink includes comprehensive unit and integration tests covering the cryptographic pipeline, framing integrity, layered onion wrapping, and DHT discovery:
+
+```bash
+# Run all Go unit tests with race detection
+go test -race -v ./...
+
+# Run static analysis
+go vet ./...
+
+# Run Flutter GUI analysis
+cd shadowlink_gui && flutter analyze && flutter test
+```
+
+---
+
+## 📚 Technical Documentation
+
+- 📖 [**Architecture Deep-Dive**](docs/ARCHITECTURE.md): Wire protocols, stream lifecycle, and packet framing specifications.
+- 🏛️ [**System Architecture Overview**](ARCHITECTURE.md): Architectural component diagrams, sequence diagrams, and threat models.
+- 📦 [**Release Notes**](docs/RELEASE_NOTES.md): Detailed changelog across releases.
+- ⚖️ [**Terms & Conditions**](TERMS_AND_CONDITIONS.md): Complete legal agreement and disclaimers.
+
+---
 
 ## 🤝 Contributing
-As a decentralized network, the strength of ShadowLink relies on the community.
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Commit changes and submit a Pull Request
+
+We welcome community contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) and our [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before submitting Pull Requests.
+
+---
 
 ## 📄 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+ShadowLink is open-source software licensed under the [MIT License](LICENSE).

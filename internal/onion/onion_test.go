@@ -118,4 +118,3 @@ func TestWrapPayload_EmptyKeys(t *testing.T) {
 		t.Error("WrapPayload with empty keys must return an error")
 	}
 }
-

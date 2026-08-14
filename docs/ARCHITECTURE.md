@@ -1,125 +1,194 @@
-# ShadowLink Architecture (Technical Deep-Dive)
+# 🔬 ShadowLink Architecture — Technical Deep-Dive
 
-> **Note**: For the high-level overview, see [ARCHITECTURE.md](../ARCHITECTURE.md).
-> This document covers the internals used for developer reference.
-
----
-
-## Packet Lifecycle — Entry to Internet
-
-```
-Browser
-  │  HTTP CONNECT example.com:443
-  ▼
-SOCKS5 Server (127.0.0.1:1080)
-  │  net.Conn → custom dialer → DialCircuit()
-  ▼
-circuit.go — DialCircuit()
-  │  FindPeers("shadowlink-relay") → [relay1, relay2]
-  │  FindPeers("shadowlink-exit")  → [exit1, exit2]
-  │  tryViaRelay(relay1, "example.com:443")
-  │    │  Host.Connect(relay1)
-  │    │  NewStream(relay1, ProtocolID)
-  │    │  stream.Write("RELAY\nexample.com:443\n")
-  │    │  PerformECDH(stream) → sessionKey K₁
-  │    └─ return libP2PConn{stream, K₁}
-  ▼
-libP2PConn.Write(plaintext)
-  │  onion.WrapPayload(plaintext, [K₁])  →  ciphertext
-  │  binary.BigEndian.PutUint32(len)     →  4-byte header
-  │  stream.Write(header + ciphertext)
-  ▼
-  [on relay's side]
-handler.go — handleRelay()
-  │  RespondECDH(stream) → K₁
-  │  FindPeers("shadowlink-exit") → [exit1]
-  │  NewStream(exit1, ProtocolID)
-  │  exitStream.Write("example.com:443\n")
-  │  PerformECDH(exitStream) → K₂
-  │  upstreamConn  = libP2PConn{stream,     K₁}
-  │  downstreamConn = libP2PConn{exitStream, K₂}
-  │  io.Copy(downstreamConn, upstreamConn)
-  ▼
-  [on exit's side]
-handler.go — handleExit()
-  │  RespondECDH(stream) → K₂
-  │  net.Dial("tcp", "example.com:443")
-  │  io.Copy(outConn, libP2PConn{stream, K₂})
-  ▼
-example.com:443 (Public Internet)
-```
+> **Reference**: For the high-level architecture overview, see [ARCHITECTURE.md](../ARCHITECTURE.md).
+> This document specifies the low-level protocols, internal package APIs, and wire formats for developers and protocol engineers.
 
 ---
 
-## Internal Package Reference
+## 1. Complete Packet Lifecycle: Application to Internet
+
+```
+[ Application / Browser ]
+         │ (HTTP/HTTPS, TCP over SOCKS5 on 127.0.0.1:1080)
+         ▼
+[ internal/socks5 — Server.ListenAndServe() ]
+         │ Intercepts connection, reads destination (e.g., example.com:443)
+         │ Invokes custom dialer: dialer(ctx, "tcp", "example.com:443")
+         ▼
+[ internal/network — DialCircuit() ]
+         │ 1. Queries DHT for active relays ("shadowlink-relay") and exits ("shadowlink-exit")
+         │ 2. Randomizes peer lists via Fisher-Yates shuffle
+         │ 3. Selects (relayPeer, exitPeer) combination
+         │ 4. Calls tryViaRelay(ctx, ds, relayPeer, exitPeer, "example.com:443")
+         ▼
+[ Handshake Phase: Entry ↔ Relay Hop ]
+         │ Entry dials relay via libp2p Host.NewStream(relayPeer, "/shadowlink/1.0.0")
+         │ Entry sends: "EXTEND\n<exitPeer.ID>\n"
+         │ Entry & Relay perform X25519 ECDH → derives RelayKey via HKDF-SHA256
+         │ Entry wraps stream into relayConn: libP2PConn{Conn: stream, Keys: [RelayKey]}
+         ▼
+[ Handshake Phase: Entry ↔ Exit Hop (Tunneled Through Relay) ]
+         │ Relay resolves exitPeer via Kad-DHT and dials NewStream(exitPeer, "/shadowlink/1.0.0")
+         │ Relay creates upstreamConn: libP2PConn{Conn: s, Keys: [RelayKey]}
+         │ Relay calls bridge(upstreamConn, streamAdapter{exitStream}) — transparent byte forwarding
+         │ Entry writes through relayConn: "CONNECT\nexample.com:443\n"
+         │ Relay decrypts outer RelayKey layer and passes raw "CONNECT\nexample.com:443\n" to Exit
+         │ Entry & Exit perform X25519 ECDH through relay tunnel → derives ExitKey via HKDF-SHA256
+         │ Entry wraps relayConn into exitConn: libP2PConn{Conn: relayConn, Keys: [ExitKey]}
+         ▼
+[ Data Transfer Phase: Onion Encapsulation ]
+         │ Application writes N plaintext bytes to exitConn:
+         │ 1. exitConn encrypts with ExitKey → ciphertext1
+         │ 2. exitConn writes to relayConn with 4-byte BE length header
+         │ 3. relayConn encrypts with RelayKey → ciphertext2
+         │ 4. relayConn writes [4-byte BE length][ciphertext2] to wire
+         ▼
+[ Relay Transit Hop ]
+         │ 1. Relay reads 4-byte length header from stream
+         │ 2. Relay reads ciphertext2 from stream into reusable buffer
+         │ 3. Relay decrypts ciphertext2 with RelayKey → yields [4-byte header][ciphertext1]
+         │ 4. Relay forwards [4-byte header][ciphertext1] to exitStream (Relay NEVER sees plaintext)
+         ▼
+[ Exit Egress Hop ]
+         │ 1. Exit reads 4-byte length header from exitStream
+         │ 2. Exit reads ciphertext1 into reusable buffer
+         │ 3. Exit decrypts ciphertext1 with ExitKey → yields original N plaintext bytes
+         │ 4. Exit dials net.Dialer.DialContext(ctx, "tcp", "example.com:443")
+         │ 5. Exit proxies bidirectionally between encrypted dVPN stream and cleartext TCP socket
+         ▼
+[ Target Host: example.com:443 (Public Internet) ]
+```
+
+---
+
+## 2. Internal Package API Specification
+
+### `internal/config`
+Defines protocol-wide constants to eliminate magic values:
+| Constant | Value | Purpose |
+|---|---|---|
+| `ProtocolID` | `"/shadowlink/1.0.0"` | libp2p stream protocol identifier |
+| `ExtendHeader` | `"EXTEND"` | Sentinel command to relay nodes for circuit extension |
+| `ConnectHeader` | `"CONNECT"` | Sentinel command to exit nodes for internet egress |
+| `RendezvousRelay` | `"shadowlink-relay"` | Kad-DHT rendezvous namespace for relay nodes |
+| `RendezvousExit` | `"shadowlink-exit"` | Kad-DHT rendezvous namespace for exit nodes |
+| `DefaultP2PPort` | `9000` | Default listening port for libp2p incoming streams |
+| `DefaultSOCKSPort` | `1080` | Default listening port for local SOCKS5 proxy |
+| `MaxFrameSize` | `131072` (128 KiB) | Maximum allowed frame size to prevent OOM attacks |
+| `HKDFInfo` | `"shadowlink/v1/session-key"` | Cryptographic domain separation string for HKDF-SHA256 |
+
+---
 
 ### `internal/crypto`
+Provides primitives for forward secrecy and authenticated encryption:
 | Function | Signature | Description |
 |---|---|---|
-| `GenerateKey()` | `([]byte, error)` | Generates a random 32-byte ChaCha20 key |
-| `Encrypt(key, plaintext)` | `([]byte, error)` | XChaCha20-Poly1305 encrypt with random nonce |
-| `Decrypt(key, ciphertext)` | `([]byte, error)` | Verify AEAD tag and decrypt |
-| `PerformECDH(rw)` | `([]byte, error)` | Initiator X25519: send pubkey first |
-| `RespondECDH(rw)` | `([]byte, error)` | Responder X25519: read pubkey first |
+| `PerformECDH(rw)` | `(io.ReadWriter) ([]byte, error)` | Initiator side: generates ephemeral X25519 key, sends public key, reads peer public key, derives 32-byte key via HKDF-SHA256. |
+| `RespondECDH(rw)` | `(io.ReadWriter) ([]byte, error)` | Responder side: reads peer public key, generates ephemeral X25519 key, sends public key, derives 32-byte key via HKDF-SHA256. |
+| `Encrypt(key, plaintext)` | `([]byte, []byte) ([]byte, error)` | Encrypts via XChaCha20-Poly1305 with single allocation: `[24-byte nonce][ciphertext + 16-byte tag]`. |
+| `Decrypt(key, ciphertext)` | `([]byte, []byte) ([]byte, error)` | Extracts nonce, decrypts, and verifies AEAD Poly1305 authentication tag. |
+| `GenerateKey()` | `() ([]byte, error)` | Generates 32 cryptographically secure random bytes (used for testing). |
+
+---
 
 ### `internal/network`
-| Type/Function | Description |
+Implements the core onion circuit negotiation, framing, and stream dispatching:
+| Type / Function | Description |
 |---|---|
-| `DialCircuit(ctx, ds, network, addr)` | Returns `net.Conn` routed through dVPN |
-| `HandleStream(s, role, ds)` | Dispatches relay or exit logic for incoming streams |
-| `libP2PConn` | `net.Conn` wrapper with 4-byte length-prefix framing + AEAD |
+| `DialCircuit(ctx, ds, network, addr)` | Entrypoint: discovers DHT peers, builds 3-hop onion circuit (or 1-hop fallback), returns `net.Conn`. |
+| `HandleStream(ctx, s, role, ds)` | Stream dispatcher: reads initial command (`EXTEND` or `CONNECT`) and routes to `handleRelay` or `handleExit`. |
+| `libP2PConn` | `net.Conn` implementation with 4-byte BE length prefix framing, layered encryption, and zero-allocation read buffers. |
+| `streamAdapter` | Adapts libp2p `network.Stream` to `net.Conn` interface by providing stub address methods. |
 
-### `internal/discovery`
-| Function | Description |
-|---|---|
-| `NewDiscoveryService(ctx, port, bootstraps)` | Creates libp2p host + KadDHT |
-| `Announce(ctx, rendezvous)` | Publishes presence under a rendezvous key |
-| `FindPeers(ctx, rendezvous)` | Returns `[]peer.AddrInfo` of matching peers |
+---
 
 ### `internal/onion`
-| Function | Description |
-|---|---|
-| `WrapPayload(data, keys)` | Encrypts with each key from last→first (outermost = first key) |
-| `UnwrapPayload(data, key)` | Peels exactly one encryption layer |
+Encapsulates recursive layered onion wrapping and peeling:
+| Function | Signature | Description |
+|---|---|---|
+| `WrapPayload(data, keys)` | `([]byte, [][]byte) ([]byte, error)` | Encrypts data with keys in reverse order (`keys[len-1]` innermost → `keys[0]` outermost). Validates non-empty keys. |
+| `UnwrapPayload(data, key)` | `([]byte, []byte) ([]byte, error)` | Peels exactly one encryption layer using the supplied symmetric key. |
+
+---
 
 ### `internal/socks5`
-| Function | Description |
+Standard RFC 1928 SOCKS5 server for desktop/mobile local client entry:
+| Type / Function | Description |
 |---|---|
-| `NewServer(port, dialer)` | Creates a SOCKS5 server with a custom dialer |
-| `ListenAndServe(ctx)` | Blocks until ctx is cancelled; returns nil on clean shutdown |
+| `NewServer(port, dialer)` | Creates SOCKS5 listener with custom circuit dialer function. |
+| `ListenAndServe(ctx)` | Serves connections until context cancellation; handles clean teardown without error leakage. |
+
+---
 
 ### `internal/sysproxy`
-| Function | Platform | Description |
+System-wide proxy automation:
+| Function | Platform | Implementation |
 |---|---|---|
-| `EnableSOCKS5(host, port)` | Windows | Writes `SOCKS=host:port` to HKCU registry |
-| `Disable()` | Windows | Clears `ProxyEnable` in registry |
-| `Disable()` | macOS/Linux | no-op, returns nil |
+| `EnableSOCKS5(host, port)` | Windows | Sets `ProxyEnable=1` and `ProxyServer="SOCKS=host:port"` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`. |
+| `Disable()` | Windows | Sets `ProxyEnable=0` to restore standard direct networking. |
+| `EnableSOCKS5(host, port)` | POSIX | Logs instructions for manual network proxy setup. |
+| `Disable()` | POSIX | No-op safe stub returning nil. |
 
 ---
 
-## Wire Protocol
+### `mobile`
+Cross-platform bindings compiled via `gomobile`:
+| Function / Method | Description |
+|---|---|
+| `StartEntryNode(socksPort)` | Instantiates mobile discovery service (port 0, opportunistic DHT) and starts SOCKS5 server. |
+| `DefaultSOCKSPort()` | Returns standard SOCKS5 port (`1080`) as `int64` for Swift/Kotlin. |
+| `MobileNode.Stop()` | Cancels context and closes libp2p host. |
 
+---
+
+## 3. Wire Protocol Specification
+
+### Header & Handshake Phase
 ```
-Stream from Entry to Relay (or Entry to Exit):
-  Byte 0..N:  "<target:port>\n"  or  "RELAY\n<target:port>\n"   (ASCII text)
-  Byte N+1..N+32:  Initiator X25519 public key                  (raw 32 bytes)
-  Byte N+33..N+64: Responder X25519 public key                  (raw 32 bytes)
-  [All subsequent bytes are length-framed encrypted frames:]
-    Bytes 0..3:   uint32 big-endian frame length
-    Bytes 4..N:   XChaCha20-Poly1305 ciphertext
+1. Entry to Relay Initial Stream:
+   ASCII text: "EXTEND\n<exit_peer_id>\n"
+   Binary:     32 Bytes Entry Ephemeral X25519 Public Key
+   Binary:     32 Bytes Relay Ephemeral X25519 Public Key (in response)
+
+2. Entry to Exit Stream (Forwarded by Relay):
+   ASCII text: "CONNECT\n<target_host:port>\n" (wrapped in RelayKey encryption)
+   Binary:     32 Bytes Entry Ephemeral X25519 Public Key (wrapped in RelayKey encryption)
+   Binary:     32 Bytes Exit Ephemeral X25519 Public Key (in response, wrapped in RelayKey encryption)
+```
+
+### Data Framing Phase
+All post-handshake frames on the wire obey the following binary layout:
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                  Frame Length (uint32 BE)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                  24-Byte XChaCha20 Nonce                      |
+|                           ...                                 |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                  Ciphertext Data (Variable)                   |
+|                           ...                                 |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                  16-Byte Poly1305 AEAD Tag                    |
+|                           ...                                 |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 ---
 
-## Test Coverage
+## 4. Test Suite Reference
 
-| Package | Test File | Cases |
+| Test Suite | Package | Covered Scenarios |
 |---|---|---|
-| `internal/crypto` | `encryption_test.go` | 8 — Encrypt/Decrypt round-trips, tamper, wrong key |
-| `internal/crypto` | `ecdh_test.go` | 4 — Shared secret equality, length, forward secrecy |
-| `internal/onion` | `onion_test.go` | 5 — 1-layer, 3-layer peel, tamper, empty |
-| `internal/network` | `framing_test.go` | 4 — Round-trip, multi-message, wrong key, large |
-| `internal/network` | `handler_test.go` | 4 — `readLineRaw` boundary correctness |
-| `internal/socks5` | `server_test.go` | 4 — Nil dialer, shutdown, port-in-use |
+| `ecdh_test.go` | `internal/crypto` | Ephemeral key generation, shared secret parity, HKDF derivation length, forward secrecy across multiple handshakes. |
+| `encryption_test.go` | `internal/crypto` | XChaCha20-Poly1305 round-trips, AEAD tag verification, wrong key rejection, ciphertext tampering detection. |
+| `onion_test.go` | `internal/onion` | 1-hop wrap/unwrap, 3-hop layered encapsulation and peeling, empty payload handling, empty keys error guard. |
+| `framing_test.go` | `internal/network` | Full stream round-trips, multiple back-to-back frames, large 32KiB payloads, wrong key AEAD rejection. |
+| `handler_test.go` | `internal/network` | Byte-by-byte `readLineRaw` validation, stop at newline without consuming key bytes, CRLF trimming, empty lines. |
+| `server_test.go` | `internal/socks5` | Nil dialer fallback, custom circuit dialer, context cancellation clean shutdown, port collision handling. |
 
-Run: `go test ./... -count=1 -race`
+To execute the test suite:
+```bash
+go test -race -v ./...
+```

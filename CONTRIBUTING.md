@@ -1,63 +1,79 @@
-# Contributing to ShadowLink
+# 🤝 Contributing to ShadowLink
 
-First off, thank you for considering contributing to ShadowLink! It's people like you that make ShadowLink such a great Decentralized VPN network.
+Thank you for contributing to ShadowLink! As a fully decentralized, community-driven privacy network, ShadowLink relies on contributors like you to maintain code quality, audit security, and build new capabilities.
 
-## Where do I go from here?
+---
 
-If you've noticed a bug or have a feature request, make an issue! It's generally best if you get confirmation of your bug or approval for your feature request this way before starting to code.
+## 📋 Code of Conduct
 
-## Fork & create a branch
+All contributors and maintainers are expected to adhere to our [Code of Conduct](CODE_OF_CONDUCT.md). Please read it before participating.
 
-If this is something you think you can fix, then fork ShadowLink and create a branch with a descriptive name.
+---
 
-A good branch name would be (where issue #325 is the ticket you're working on):
+## 🛠️ Development Environment
 
-```sh
-git checkout -b 325-add-udp-support
-```
+### Prerequisites
+- **Go**: Version 1.22 or higher ([Download](https://go.dev/dl/))
+- **Flutter SDK**: Version 3.10 or higher ([Download](https://flutter.dev/docs/get-started/install))
+- **Git**: For source control
 
-## Get the test suite running
+---
 
-Make sure you have **Go 1.21+** and **Flutter 3.10+** installed.
+## 🧪 Testing Guidelines
 
-### Go Backend Daemon
-Run the full test suite with race detection enabled before you start coding:
-```sh
+Before opening a pull request, ensure that all tests pass cleanly without errors, race conditions, or lint warnings.
+
+### 1. Go Core Engine
+```bash
+# Run all unit tests with data race detector enabled
 go test -race -v ./...
+
+# Run static analysis
+go vet ./...
+
+# Ensure code is formatted to Go standards
+go fmt ./...
 ```
 
-### Flutter GUI
-Ensure the frontend is clean and tests pass:
-```sh
+### 2. Flutter GUI
+```bash
 cd shadowlink_gui
+
+# Run static analysis and linter
 flutter analyze
+
+# Run Flutter unit and widget tests
 flutter test
 ```
 
-## Implement your fix or feature
+---
 
-At this point, you're ready to make your changes. Feel free to ask for help; everyone is a beginner at first. Make sure your code follows the standard Go formatting conventions (run `go fmt ./...`).
+## 🌿 Contribution Workflow
 
-## Make a Pull Request
+1. **Fork the Repository**: Create your own fork of `TUSHAR91316/ShadowLink`.
+2. **Create a Topic Branch**:
+   ```bash
+   git checkout -b feature/add-transport-obfuscation
+   ```
+3. **Write Clean, Documented Code**:
+   - Adhere to Effective Go standards and Flutter recommended practices.
+   - Never introduce hardcoded values; define protocol constants in `internal/config/config.go` or `lib/config/app_config.dart`.
+   - Ensure all cryptographic operations utilize domain-separated HKDF or standard AEAD routines.
+4. **Commit with Descriptive Messages**:
+   ```bash
+   git commit -m "feat(network): add multi-frame fragmentation support"
+   ```
+5. **Rebase on Main**:
+   ```bash
+   git checkout main
+   git pull upstream main
+   git checkout feature/add-transport-obfuscation
+   git rebase main
+   ```
+6. **Submit a Pull Request**: Provide a clear explanation of what your PR accomplishes, including verification steps and test outputs.
 
-At this point, you should switch back to your master branch and make sure it's up to date with ShadowLink's master branch:
+---
 
-```sh
-git remote add upstream git@github.com:TUSHAR91316/ShadowLink.git
-git checkout master
-git pull upstream master
-```
+## 🔒 Security Vulnerability Reporting
 
-Then update your feature branch from your local copy of master, and push it!
-
-```sh
-git checkout 325-add-udp-support
-git rebase master
-git push --set-upstream origin 325-add-udp-support
-```
-
-Finally, go to GitHub and make a Pull Request.
-
-## Keeping your Pull Request updated
-
-If a maintainer asks you to "rebase" your PR, they're saying that a lot of code has changed, and that you need to update your branch so it's easier to merge.
+If you discover a potential security flaw or cryptographic vulnerability, please **do not open a public issue**. Instead, submit a responsible disclosure report directly to the core maintainers.

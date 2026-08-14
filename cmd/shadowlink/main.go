@@ -22,12 +22,12 @@ import (
 
 func main() {
 	// CLI flags — defaults sourced from config so they are never hardcoded here.
-	port       := flag.Int("port", config.DefaultP2PPort, "Port for incoming P2P connections (0 = OS-assigned)")
-	socksPort  := flag.Int("socks", config.DefaultSOCKSPort, "Port for the local SOCKS5 proxy")
-	isEntry    := flag.Bool("entry", false, "Run as an entry node (client-side proxy)")
-	isRelay    := flag.Bool("relay", false, "Run as a relay node (middleman hop)")
-	isExit     := flag.Bool("exit", false, "Run as an exit node (internet egress)")
-	setProxy   := flag.Bool("sysproxy", false, "Automatically configure the OS system proxy (Windows only)")
+	port := flag.Int("port", config.DefaultP2PPort, "Port for incoming P2P connections (0 = OS-assigned)")
+	socksPort := flag.Int("socks", config.DefaultSOCKSPort, "Port for the local SOCKS5 proxy")
+	isEntry := flag.Bool("entry", false, "Run as an entry node (client-side proxy)")
+	isRelay := flag.Bool("relay", false, "Run as a relay node (middleman hop)")
+	isExit := flag.Bool("exit", false, "Run as an exit node (internet egress)")
+	setProxy := flag.Bool("sysproxy", false, "Automatically configure the OS system proxy (Windows only)")
 	resetProxy := flag.Bool("reset-proxy", false, "Reset the OS system proxy and exit immediately")
 	flag.Parse()
 

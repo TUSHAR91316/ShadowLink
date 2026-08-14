@@ -1,44 +1,46 @@
-# Release v1.0.0 - Electron Evolution: Hybrid Architecture & Cyber UI
-
-> **⚠️ LEGACY RELEASE (v1.0.0)**: This release notes file documents the deprecated Electron + Python architecture. See `release/release.md` for the current v2.0.0 Go + Flutter release.
-
-> **Major Update**: Replaced legacy GUI with a high-performance Electron + React frontend.
-
-Includes `ShadowLink Setup 1.0.0.exe` for Windows x64.
+# 📜 ShadowLink Release Notes & Changelog
 
 ---
 
-## 🚀 Key Improvements
+## 🚀 Release v2.0.3-alpha — True Onion Routing & Zero-Allocation Engine
 
-- **New UI**: Built with React, TailwindCSS, and Framer Motion for smooth animations and a modern "cyber" aesthetic.
-- **Hybrid Core**:
-  - **Frontend**: Electron (Process Management & UI).
-  - **Backend**: Python (Encryption & Networking Logic) running as a secure subprocess.
-- **Enhanced Security**: 
-  - Verification script included (`src/verify_encryption.py`) to audit X25519 + AES-256-GCM implementation.
-  - Strict separation of concerns between UI and Encryption layers.
-- **System-Wide Proxy**: One-click toggle to route all system traffic through the secure tunnel.
+**Release Date:** August 2026  
+**Status:** Alpha Release (Recommended)
 
-## 📦 Download
+### 🔒 Security & Onion Routing Overhaul
+- **True Multi-Hop Encapsulation**: Migrated from hop-by-hop re-encryption to full 3-hop layered onion routing using `EXTEND` and `CONNECT` control frames. Relay nodes now operate as blind forwarders and cannot inspect payload traffic or target destinations.
+- **Nested `libP2PConn` Chaining**: Dynamic crypto wrapping applies inner `exitKey` and outer `relayKey` layers with 4-byte big-endian framing.
+- **Strict Protocol Validation**: Empty-key error guards added to `onion.WrapPayload` and `onion.UnwrapPayload` to prevent unencrypted transmissions.
+- **Slow-Loris Guard**: Added strict line-length bounds in `readLineRaw` to protect nodes from memory-exhaustion attacks.
 
-| File | SHA256 Checksum |
-| :--- | :--- |
-| **ShadowLink Setup 1.0.0.exe** | `d761e1bdccaa57187424602958087146522881223963456860000a45e78041c5` |
+### ⚡ Performance & Memory
+- **Zero-Allocation Read Path**: Pre-allocated, reusable buffer (`frameBuf`) in `libP2PConn` eliminates Garbage Collection pauses during large file transfers.
+- **Atomic Wire Writes**: Frame length header and ciphertext are merged into a single atomic write buffer to prevent partial-packet wire races.
+- **Goroutine Leak Prevention**: Fixed `bridge()` to forcibly close companion streams upon peer disconnection, ensuring zero lingering routines.
 
-*(Verify checksum after download using `certutil -hashfile filename SHA256` in PowerShell)*
-
-## 🛠️ Comparison vs Standard Proxy
-
-| Feature | Standard SOCKS5 | **ShadowLink v1.0** |
-| :--- | :--- | :--- |
-| **Encryption** | None | **AES-256-GCM** |
-| **Keys** | Static | **Ephemeral X25519** (Rotates per session) |
-| **Scope** | App-specific | **System-Wide** or App-specific |
-
-## ⚠️ Notes
-- Requires **Windows 10/11 x64**.
-- If SmartScreen warns you, choose "Run Anyway" (as this is a self-signed open-source build).
+### 📱 Mobile & CI/CD
+- **`gomobile` Tooling Directive**: Integrated Go 1.24+ `tool` dependencies for clean `gomobile bind` workflows.
+- **NDK API 21+ Compatibility**: Fixed Android build pipeline by explicitly targeting modern Android NDK toolchains.
+- **iOS Framework Search Paths**: Standardized Xcode project linkage for `Mobile.xcframework`.
 
 ---
 
-**Full Changelog**: https://github.com/TUSHAR91316/ShadowLink/compare/legacy...v1.0.0
+## 🏛️ Release v2.0.0-alpha — Go Rewrite & Flutter Cyber UI
+
+**Release Date:** July 2026  
+**Status:** Archived
+
+### Major Highlights
+- **Complete Go Engine**: Fully deprecated legacy Python codebase in favor of a memory-safe, concurrent Go engine built on `libp2p`.
+- **Serverless Discovery**: Implemented Kademlia DHT peer discovery, removing all hardcoded central trackers.
+- **Modern Flutter Frontend**: Replaced old Electron GUI with a high-performance Flutter desktop app styled in a Deep Obsidian & Neon Cyan aesthetic.
+- **Windows System Proxy**: Automatic registry proxying with failsafe `--reset-proxy` recovery.
+
+---
+
+## ⚠️ Legacy Release v1.0.0 — Electron & Python Prototype
+
+**Status:** Deprecated (Archived in `legacy_python/`)
+
+- Hybrid architecture combining Electron frontend with Python backend subprocess.
+- Single-hop encrypted proxying via AES-256-GCM.

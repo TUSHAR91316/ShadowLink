@@ -37,12 +37,12 @@ func (p *pipeStream) SetReadDeadline(t time.Time) error                { return 
 func (p *pipeStream) SetWriteDeadline(t time.Time) error               { return p.nc.SetWriteDeadline(t) }
 
 // Stream-specific metadata methods
-func (p *pipeStream) ID() string                          { return "pipe" }
-func (p *pipeStream) Protocol() protocol.ID               { return "/test/1.0.0" }
-func (p *pipeStream) SetProtocol(_ protocol.ID) error     { return nil }
-func (p *pipeStream) Stat() libp2pnet.Stats               { return libp2pnet.Stats{} }
-func (p *pipeStream) Conn() libp2pnet.Conn                { return nil }
-func (p *pipeStream) Scope() libp2pnet.StreamScope        { return nil }
+func (p *pipeStream) ID() string                      { return "pipe" }
+func (p *pipeStream) Protocol() protocol.ID           { return "/test/1.0.0" }
+func (p *pipeStream) SetProtocol(_ protocol.ID) error { return nil }
+func (p *pipeStream) Stat() libp2pnet.Stats           { return libp2pnet.Stats{} }
+func (p *pipeStream) Conn() libp2pnet.Conn            { return nil }
+func (p *pipeStream) Scope() libp2pnet.StreamScope    { return nil }
 
 // newStreamPair creates two connected pipeStreams backed by net.Pipe().
 func newStreamPair(t *testing.T) (*pipeStream, *pipeStream) {

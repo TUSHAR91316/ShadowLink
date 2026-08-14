@@ -1,54 +1,87 @@
-# ShadowLink v2.0.0-alpha Release
+# 📦 ShadowLink v2.0.3-alpha Release
 
-Welcome to the new era of ShadowLink! This release completely transitions the network from the legacy Python architecture to an insanely fast, memory-safe Go core featuring native Decentralized VPN capabilities.
+Welcome to **ShadowLink v2.0.3-alpha**! This release marks the completion of the transition from legacy Python to a high-performance Go core featuring true multi-hop Onion Routing, zero-allocation memory framing, and universal cross-platform Flutter support.
 
-> **LEGAL DISCLAIMER:** By downloading or executing any of these binaries, you legally bind yourself to the [TERMS_AND_CONDITIONS.md](../TERMS_AND_CONDITIONS.md). The developers assume absolutely zero liability for your actions. Running an Exit Node exposes your IP address to third-party traffic; you do so entirely at your own personal and legal risk.
+> **⚖️ LEGAL DISCLAIMER:** By downloading, distributing, or running any of these binaries, you legally bind yourself to the [TERMS_AND_CONDITIONS.md](../TERMS_AND_CONDITIONS.md). The developers assume zero liability for your actions. Operating an Exit Node exposes your IP address to third-party egress traffic; you do so entirely at your own personal and legal risk.
 
-## Cross-Platform Binaries
-Included in this folder are statically linked, zero-dependency binaries for all major operating systems, paired with a brand-new Flutter Desktop GUI:
+---
 
-### GUI Application (shadowlink_gui)
-- `shadowlink-gui-windows-x64.exe` (Standalone Windows Installer)
-- The installer automatically bundles the Go daemon process.
+## 🚀 Key Release Highlights
 
-### CLI Backend (headless)
-- `shadowlink-windows-x64.exe`: For Windows 10/11 (64-bit)
-- `shadowlink-macos-intel`: For macOS (Intel processors)
-- `shadowlink-macos-apple-silicon`: For macOS (Apple Silicon M1/M2/M3)
-- `shadowlink-linux-x64`: For standard Linux distros (Ubuntu, Debian, Fedora, Arch)
+- **🔒 True 3-Hop Onion Routing**: Relays act as transparent intermediaries via the `EXTEND` protocol without access to plaintext application data or destination endpoints.
+- **⚡ Zero-Allocation Framing Engine**: Reusable buffer architecture within `libP2PConn` eliminates garbage collection pauses during high-bandwidth downloads.
+- **🔑 Forward-Secret Cryptography**: Ephemeral **X25519 ECDH** + **HKDF-SHA256** session key derivation paired with **XChaCha20-Poly1305 AEAD**.
+- **🌐 Serverless Kad-DHT Discovery**: Automatic decentralized node discovery over `libp2p`.
+- **📱 Universal Desktop & Mobile Engine**: Native binaries for Windows, macOS, and Linux, plus `gomobile` packages for Android and iOS.
 
-*(Note: iOS and Android framework compilation requires `gomobile` and will be handled in a mobile-specific pipeline later).*
+---
 
-## Getting Started
+## 📥 Available Artifacts
 
-### Windows
-1. Open PowerShell or Command Prompt.
-2. Run as a client (entry node):
-   ```powershell
-   .\shadowlink-windows-x64.exe --role entry --socks 1080 --sysproxy
-   ```
-   *This automatically configures your Windows proxy settings to use the dVPN!*
+### 🖥️ Desktop CLI Binaries
+- **Windows (x64)**: `shadowlink-windows-x64.exe`
+- **Linux (x64)**: `shadowlink-linux-x64`
+- **macOS (Apple Silicon M1/M2/M3/M4)**: `shadowlink-macos-apple-silicon`
+- **macOS (Intel x64)**: `shadowlink-macos-intel`
 
-### macOS / Linux
-1. Open Terminal.
-2. Make the binary executable (e.g., for Linux): 
-   ```bash
-   chmod +x shadowlink-linux-x64
-   ```
-3. Run as a client:
-   ```bash
-   ./shadowlink-linux-x64 --role entry --socks 1080
-   ```
+### 📱 Mobile Frameworks (via CI/CD)
+- **Android**: `shadowlink_gui/android/app/libs/mobile.aar` (Compiled targeting Android API 21+)
+- **iOS**: `shadowlink_gui/ios/Mobile.xcframework` (Multi-architecture XCFramework for iOS Device & Simulator)
 
-### Community Participation
-ShadowLink is a purely free, decentralized network. You can help power the network by running your machine as a relay or exit node.
+---
 
-**Start a Relay Node:**
-```bash
-./shadowlink-linux-x64 --role relay --port 9001
+## 🛠️ Usage Instructions
+
+### 1. Windows (Client / Entry Node with System Proxy)
+Open PowerShell and run:
+```powershell
+.\shadowlink-windows-x64.exe --entry --socks 1080 --sysproxy
+```
+*This starts the local SOCKS5 proxy on port 1080 and automatically configures Windows Internet Settings to route traffic through the dVPN.*
+
+To reset proxy settings at any time:
+```powershell
+.\shadowlink-windows-x64.exe --reset-proxy
 ```
 
-**Start an Exit Node:**
+### 2. Linux & macOS (Client / Entry Node)
+Open Terminal and run:
 ```bash
-./shadowlink-linux-x64 --role exit --port 9002
+# Make binary executable
+chmod +x shadowlink-linux-x64
+
+# Start Entry Node
+./shadowlink-linux-x64 --entry --socks 1080
+```
+
+### 3. Community Nodes (Relay & Exit)
+Help power the decentralized network by volunteering bandwidth:
+
+#### Run a Relay Node (Blind Traffic Hop):
+```bash
+./shadowlink-linux-x64 --relay --port 9001
+```
+
+#### Run an Exit Node (Internet Egress Gateway):
+```bash
+./shadowlink-linux-x64 --exit --port 9002
+```
+
+#### Run Combined Roles:
+```bash
+./shadowlink-linux-x64 --entry --relay --port 9000 --socks 1080
+```
+
+---
+
+## 🔍 Binary Integrity Verification
+
+Verify your downloaded binary against the published SHA-256 checksums:
+
+```powershell
+# On Windows PowerShell
+Get-FileHash shadowlink-windows-x64.exe -Algorithm SHA256
+
+# On Linux / macOS
+sha256sum shadowlink-linux-x64
 ```

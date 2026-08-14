@@ -1,42 +1,83 @@
-# ShadowLink GUI
+# 🎨 ShadowLink GUI (Desktop & Mobile)
 
-This is the modern Flutter Desktop interface for the ShadowLink decentralized VPN.
+This is the official Flutter interface for the **ShadowLink Decentralized VPN**, featuring a modern **Deep Obsidian & Neon Cyan** cyber aesthetic.
 
-## Architecture
+---
 
-The Flutter application acts as the control plane for the ShadowLink network. It does **not** handle any cryptographic or networking tasks itself. Instead, it manages a child process (the Go daemon) which handles the heavy lifting.
+## 🏗️ Architecture
+
+The Flutter application serves as the control plane for the dVPN. It dynamically adapts its backend integration strategy depending on the host platform:
 
 ```mermaid
-graph LR
-    Flutter["Flutter GUI\n(shadowlink_gui)"] -->|"spawn + monitor"| GoBinary["Go Daemon\n(shadowlink.exe)"]
+graph TD
+    subgraph "Desktop Platform (Windows / macOS / Linux)"
+        GUI_Desktop["Flutter Desktop App"] -->|"DaemonService (Process.start)"| DaemonBin["shadowlink.exe / binary"]
+        DaemonBin -->|"Stdout log stream"| GUI_Desktop
+        GUI_Desktop -->|"On Exit: --reset-proxy failsafe"| DaemonBin
+    end
+
+    subgraph "Mobile Platform (Android / iOS)"
+        GUI_Mobile["Flutter Mobile App"] -->|"MethodChannel ('com.shadowlink/node')"| MobileEngine["MobileNode (gomobile bindings)"]
+        MobileEngine -->|"In-process libp2p + SOCKS5"| Loopback["127.0.0.1:1080"]
+    end
 ```
 
-## Features
-- **Cyber Aesthetic**: Deep obsidian and neon cyan design system for a professional look.
-- **Role Selection**: Toggle between Entry, Relay, and Exit node roles with a single click.
-- **Live Logs**: Real-time log streaming from the daemon child process.
-- **Failsafe System Proxy**: On exit, the GUI guarantees the system proxy is reset (`shadowlink.exe --reset-proxy`) to prevent breaking the user's internet connection.
-- **Mandatory EULA**: Legally binding EULA that users must accept before using the software.
+---
 
-## Development Setup
+## ✨ Features
 
-1. Ensure the Go daemon is built first (the GUI expects the binary in the `release/` directory for dev fallback, or next to the executable in production).
-   ```bash
-   cd ..
-   go build -o release/shadowlink-windows-x64.exe ./cmd/shadowlink
-   ```
+- **Cyber Aesthetic UI**: Custom design system utilizing deep dark surfaces, vibrant cyan accents, and smooth micro-animations.
+- **Dynamic Role Management**: Switch between Client (Entry), Relay, and Exit node configurations on desktop.
+- **Live Terminal Telemetry**: Real-time log capture and stream parsing directly from the Go engine.
+- **Failsafe System Proxy**: On desktop abnormal exit, invokes `shadowlink --reset-proxy` to prevent internet disconnection.
+- **Strict Legal Compliance**: Enforces non-skippable EULA acceptance before initializing any networking operations.
 
-2. Run the Flutter app:
-   ```bash
-   cd shadowlink_gui
-   flutter pub get
-   flutter run -d windows
-   ```
+---
 
-## Production Build
+## 🚀 Development & Build
 
-To build the release executable for Windows:
+### 1. Prerequisites
+- **Flutter SDK**: 3.10+
+- **Go**: 1.22+
+
+### 2. Desktop Development
+Before launching the desktop GUI in development mode, compile the Go binary:
+
 ```bash
-flutter build windows
+# From repository root
+go build -o release/shadowlink-windows-x64.exe ./cmd/shadowlink
+
+# Navigate to GUI directory and run
+cd shadowlink_gui
+flutter pub get
+flutter run -d windows    # Or -d macos / -d linux
 ```
-*(The installer will bundle `shadowlink.exe` directly beside the Flutter executable).*
+
+### 3. Desktop Production Build
+```bash
+flutter build windows --release
+flutter build macos --release
+flutter build linux --release
+```
+
+### 4. Mobile Compilation (Android / iOS)
+Mobile builds leverage `gomobile` to compile Go core bindings into native libraries:
+
+```bash
+# 1. Install gomobile tools
+go install golang.org/x/mobile/cmd/gomobile@latest
+go install golang.org/x/mobile/cmd/gobind@latest
+gomobile init
+
+# 2. Build Android AAR
+mkdir -p shadowlink_gui/android/app/libs
+gomobile bind -v -target=android -androidapi 21 -o shadowlink_gui/android/app/libs/mobile.aar ./mobile
+
+# 3. Build iOS XCFramework
+gomobile bind -v -target=ios,iossimulator -o shadowlink_gui/ios/Mobile.xcframework ./mobile
+
+# 4. Build Flutter mobile app
+cd shadowlink_gui
+flutter build apk --release      # Android APK
+flutter build ipa --no-codesign  # iOS IPA
+```

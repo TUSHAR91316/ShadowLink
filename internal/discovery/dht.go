@@ -64,7 +64,9 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 // all goroutines to finish before returning.
 //
 // Previously this had a classic Go goroutine variable capture bug:
-//   go func() { h.Connect(ctx, *peerinfo) }()
+//
+//	go func() { h.Connect(ctx, *peerinfo) }()
+//
 // where peerinfo was reused across loop iterations before the goroutine ran.
 // This is now fixed by passing peerinfo as a function argument.
 func connectToBootstrapPeers(ctx context.Context, h host.Host, bootstrapPeers []string) {
