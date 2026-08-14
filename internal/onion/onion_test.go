@@ -109,3 +109,13 @@ func TestWrapPayload_EmptyPayload(t *testing.T) {
 		t.Errorf("expected empty result, got %d bytes", len(result))
 	}
 }
+
+// TestWrapPayload_EmptyKeys verifies that WrapPayload returns an error when
+// called with no keys (previously it would silently return the unencrypted payload).
+func TestWrapPayload_EmptyKeys(t *testing.T) {
+	_, err := WrapPayload([]byte("secret"), [][]byte{})
+	if err == nil {
+		t.Error("WrapPayload with empty keys must return an error")
+	}
+}
+

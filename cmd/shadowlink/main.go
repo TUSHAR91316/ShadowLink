@@ -21,23 +21,27 @@ import (
 )
 
 func main() {
-	// CLI flags — defaults sourced from config package so they are never hardcoded here.
-	port := flag.Int("port", config.DefaultP2PPort, "Port to listen on for P2P connections")
-	socksPort := flag.Int("socks", config.DefaultSOCKSPort, "Port to listen on for SOCKS5 proxy")
-	isEntry := flag.Bool("entry", false, "Run as an entry node (client)")
-	isRelay := flag.Bool("relay", false, "Run as a relay node")
-	isExit := flag.Bool("exit", false, "Run as an exit node")
-	setProxy := flag.Bool("sysproxy", false, "Set system proxy on Windows")
-	resetProxy := flag.Bool("reset-proxy", false, "Reset system proxy and exit")
+	// CLI flags — defaults sourced from config so they are never hardcoded here.
+	port       := flag.Int("port", config.DefaultP2PPort, "Port for incoming P2P connections (0 = OS-assigned)")
+	socksPort  := flag.Int("socks", config.DefaultSOCKSPort, "Port for the local SOCKS5 proxy")
+	isEntry    := flag.Bool("entry", false, "Run as an entry node (client-side proxy)")
+	isRelay    := flag.Bool("relay", false, "Run as a relay node (middleman hop)")
+	isExit     := flag.Bool("exit", false, "Run as an exit node (internet egress)")
+	setProxy   := flag.Bool("sysproxy", false, "Automatically configure the OS system proxy (Windows only)")
+	resetProxy := flag.Bool("reset-proxy", false, "Reset the OS system proxy and exit immediately")
 	flag.Parse()
 
+	// Handle --reset-proxy before anything else so it exits cleanly.
 	if *resetProxy {
-		sysproxy.Disable()
+		if err := sysproxy.Disable(); err != nil {
+			log.Printf("Warning: failed to reset system proxy: %v", err)
+		}
 		return
 	}
 
+	// Default to entry node if no role is specified.
 	if !*isEntry && !*isRelay && !*isExit {
-		log.Println("No roles specified. Defaulting to --entry")
+		log.Println("No role specified — defaulting to --entry")
 		*isEntry = true
 	}
 
@@ -46,86 +50,89 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log.Printf("Starting ShadowLink node (Entry: %v, Relay: %v, Exit: %v)", *isEntry, *isRelay, *isExit)
+	log.Printf("Starting ShadowLink (entry=%v relay=%v exit=%v port=%d socks=%d)",
+		*isEntry, *isRelay, *isExit, *port, *socksPort)
 
-	// Initialize the DHT Discovery Service.
-	// Bootstrap peers sourced from config.DefaultBootstrapPeers.
+	// Initialise the libp2p host and Kad-DHT discovery service.
 	ds, err := discovery.NewDiscoveryService(ctx, *port, config.DefaultBootstrapPeers)
 	if err != nil {
-		log.Fatalf("Failed to initialize discovery service: %v", err)
+		log.Fatalf("Failed to initialise discovery service: %v", err)
 	}
+	defer ds.Host.Close()
 
-	// Register DHT role announcements and stream handlers for relay/exit nodes.
+	// ── Relay / Exit node setup ────────────────────────────────────────────
 	if *isRelay || *isExit {
 		if *isRelay {
 			if err := ds.Announce(ctx, config.RendezvousRelay); err != nil {
-				log.Printf("Failed to announce relay role: %v", err)
+				log.Printf("Warning: failed to announce relay role: %v", err)
 			}
 		}
 		if *isExit {
 			if err := ds.Announce(ctx, config.RendezvousExit); err != nil {
-				log.Printf("Failed to announce exit role: %v", err)
+				log.Printf("Warning: failed to announce exit role: %v", err)
 			}
 		}
 
+		// Determine the role string for logging inside HandleStream.
 		role := "relay"
-		if *isExit {
+		if *isExit && !*isRelay {
 			role = "exit"
+		} else if *isRelay && *isExit {
+			role = "relay+exit"
 		}
 
-		// Pass ctx into HandleStream so relay's downstream queries are
-		// cancelled cleanly when the main context is cancelled on shutdown.
+		// ctx is captured correctly here — the closure is set once, not per-call.
 		ds.Host.SetStreamHandler(config.ProtocolID, func(s libp2pnet.Stream) {
 			network.HandleStream(ctx, s, role, ds)
 		})
 	}
 
-	// Start the local SOCKS5 proxy for entry node mode.
+	// ── Entry node setup ───────────────────────────────────────────────────
 	if *isEntry {
-		log.Printf("Starting local SOCKS5 proxy on port %d", *socksPort)
+		log.Printf("Starting SOCKS5 proxy on 127.0.0.1:%d", *socksPort)
 
-		dialer := func(ctx context.Context, netwk, addr string) (net.Conn, error) {
-			return network.DialCircuit(ctx, ds, netwk, addr)
+		dialer := func(dialCtx context.Context, netwk, addr string) (net.Conn, error) {
+			return network.DialCircuit(dialCtx, ds, netwk, addr)
 		}
 
 		proxy, err := socks5.NewServer(*socksPort, dialer)
 		if err != nil {
-			log.Fatalf("Failed to initialize SOCKS5 proxy: %v", err)
+			log.Fatalf("Failed to create SOCKS5 proxy: %v", err)
 		}
 
 		go func() {
 			if err := proxy.ListenAndServe(ctx); err != nil {
-				log.Printf("SOCKS5 proxy stopped: %v", err)
+				log.Printf("SOCKS5 proxy error: %v", err)
 			}
 		}()
 
 		if *setProxy {
-			log.Println("Setting system proxy...")
 			if err := sysproxy.EnableSOCKS5("127.0.0.1", *socksPort); err != nil {
-				log.Printf("Warning: Failed to set system proxy: %v", err)
+				log.Printf("Warning: failed to set system proxy: %v", err)
 			} else {
+				log.Println("System proxy configured")
+				// Restore proxy state on shutdown.
 				defer func() {
-					log.Println("Disabling system proxy...")
 					if err := sysproxy.Disable(); err != nil {
-						log.Printf("Warning: Failed to disable system proxy: %v", err)
+						log.Printf("Warning: failed to reset system proxy: %v", err)
 					}
 				}()
 			}
 		}
 	}
 
-	// Block until the user sends SIGINT or SIGTERM.
+	// ── Block until SIGINT / SIGTERM ───────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	log.Println("Shutting down ShadowLink gracefully...")
-	cancel()        // Cancel all active dials and contexts.
-	ds.Host.Close() // Immediately free the libp2p port binding.
+	sig := <-sigCh
+	log.Printf("Received signal %s — shutting down gracefully...", sig)
+	cancel() // Cancel all active dials and DHT operations.
 }
 
+// checkEULA prompts the user to accept the Terms & Conditions on first run.
+// A sentinel file (config.EULAFileName) is written to disk on acceptance.
+// If the file already exists the function returns immediately.
 func checkEULA() {
-	// EULA file name sourced from config — not hardcoded.
 	if _, err := os.Stat(config.EULAFileName); err == nil {
 		return // Already accepted
 	}
@@ -134,22 +141,26 @@ func checkEULA() {
 	fmt.Println("         SHADOWLINK END USER LICENSE AGREEMENT & TERMS OF SERVICE")
 	fmt.Println("================================================================================")
 	fmt.Println("WARNING: By using this software, you agree to the following terms:")
-	fmt.Println("")
-	fmt.Println("1. NO INFRASTRUCTURE: ShadowLink is an open-source protocol. The developers ")
+	fmt.Println()
+	fmt.Println("1. NO INFRASTRUCTURE: ShadowLink is an open-source protocol. The developers")
 	fmt.Println("   operate NO network servers and have NO control over peer-to-peer traffic.")
-	fmt.Println("2. ABSOLUTE LIMITATION OF LIABILITY: The developers assume ABSOLUTELY ZERO ")
+	fmt.Println("2. ABSOLUTE LIMITATION OF LIABILITY: The developers assume ABSOLUTELY ZERO")
 	fmt.Println("   LIABILITY for any damages, legal repercussions, or network traffic.")
-	fmt.Println("3. COMPLIANCE: You assume 100% of the legal risk. You agree NOT to use this ")
+	fmt.Println("3. COMPLIANCE: You assume 100% of the legal risk. You agree NOT to use this")
 	fmt.Println("   software to violate any local, national, or international laws.")
 	fmt.Println("4. EXIT NODES: Running an Exit Node exposes your IP to third-party traffic.")
 	fmt.Println("   You do so ENTIRELY at your own personal and legal risk.")
-	fmt.Println("")
-	fmt.Println("You must read the full TERMS_AND_CONDITIONS.md file in the root directory.")
+	fmt.Println()
+	fmt.Println("Read the full TERMS_AND_CONDITIONS.md before proceeding.")
 	fmt.Println("================================================================================")
-	fmt.Print("To legally bind yourself to these terms, type 'I ACCEPT' and press Enter: ")
+	fmt.Print("Type 'I ACCEPT' and press Enter to agree: ")
 
 	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("\nFailed to read input. Exiting.")
+		os.Exit(1)
+	}
 	input = strings.TrimSpace(input)
 
 	if input != "I ACCEPT" {
@@ -157,6 +168,8 @@ func checkEULA() {
 		os.Exit(1)
 	}
 
-	os.WriteFile(config.EULAFileName, []byte("accepted"), 0644)
+	if err := os.WriteFile(config.EULAFileName, []byte("accepted\n"), 0o600); err != nil {
+		log.Printf("Warning: could not write EULA acceptance file: %v", err)
+	}
 	fmt.Println("Terms accepted. Starting ShadowLink...")
 }

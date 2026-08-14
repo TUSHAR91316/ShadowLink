@@ -1,13 +1,13 @@
 package network
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net"
-	"context"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -26,17 +26,17 @@ import (
 // Relay and exit peers are selected randomly (Fisher-Yates shuffle) to prevent
 // a traffic analysis attack where a passive observer could predict the routing path.
 //
-// Each hop uses an independent, ephemeral X25519 ECDH session key derived via HKDF.
-// Forward secrecy is guaranteed — every connection uses a unique key.
+// The 3-hop path uses true Onion Routing: the Entry node independently negotiates
+// ECDH session keys with both the Relay and the Exit node. The Relay never sees
+// plaintext — it only strips one layer of encryption before forwarding.
 func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetwork, targetAddr string) (net.Conn, error) {
 	log.Printf("DialCircuit: building circuit for %s", targetAddr)
 
 	exits, err := ds.FindPeers(ctx, config.RendezvousExit)
 	if err != nil || len(exits) == 0 {
-		return nil, fmt.Errorf("no exit nodes found in DHT: %v", err)
+		return nil, fmt.Errorf("no exit nodes found in DHT: %w", err)
 	}
-
-	// Shuffle exit and relay lists before iterating to randomise routing.
+	// Shuffle exit list to randomise routing and avoid selection bias.
 	rand.Shuffle(len(exits), func(i, j int) { exits[i], exits[j] = exits[j], exits[i] })
 
 	// Prefer 3-hop routing through a relay node.
@@ -57,13 +57,14 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 	return dialDirect(ctx, ds, exits, targetAddr)
 }
 
-// dialViaRelay attempts a 3-hop circuit through available relay nodes.
+// dialViaRelay attempts a 3-hop circuit through available relay/exit node combinations.
+// It iterates over all (relay, exit) pairs (skipping same-node combos) until one succeeds.
 func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, relay := range relays {
 		for _, exit := range exits {
 			if relay.ID == exit.ID {
-				continue // Avoid using the same node as both relay and exit
+				continue // Never use the same node as both relay and exit
 			}
 			conn, err := tryViaRelay(ctx, ds, relay, exit, targetAddr)
 			if err != nil {
@@ -75,55 +76,73 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 			return conn, nil
 		}
 	}
-	return nil, fmt.Errorf("all relay/exit combinations failed: %v", lastErr)
+	return nil, fmt.Errorf("all relay/exit combinations failed: %w", lastErr)
 }
 
-// tryViaRelay connects to a relay, extends to an exit, and negotiates keys with both.
+// tryViaRelay builds a true 3-hop onion circuit: Entry → Relay → Exit.
+//
+// Protocol:
+//  1. Connect to the relay and send "EXTEND\n<ExitPeerID>\n" in plaintext.
+//  2. ECDH with the relay (Entry = INITIATOR) → relayKey.
+//  3. The relay connects to the exit and bridges the raw byte stream transparently.
+//  4. Entry sends "CONNECT\n<TargetAddr>\n" encrypted with relayKey through relayConn.
+//  5. ECDH with the exit through the relay → exitKey.
+//  6. Return a nested libP2PConn: inner is relayConn (relayKey), outer adds exitKey.
+//
+// The exit node receives the CONNECT command + exitKey exchange decrypted from
+// the outer relay layer. The relay only strips the outer layer; it never sees plaintext.
 func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exit peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, relay); err != nil {
-		return nil, fmt.Errorf("connect to relay: %v", err)
+		return nil, fmt.Errorf("connect to relay: %w", err)
 	}
 	stream, err := ds.Host.NewStream(ctx, relay.ID, config.ProtocolID)
 	if err != nil {
-		return nil, fmt.Errorf("open stream to relay: %v", err)
+		return nil, fmt.Errorf("open stream to relay: %w", err)
 	}
-	cleanup := true
+
+	// resetOnError ensures the underlying stream is always torn down on failure.
+	success := false
 	defer func() {
-		if cleanup && stream != nil {
+		if !success {
 			stream.Reset()
 		}
 	}()
 
-	// Signal EXTEND mode and provide the exit peer ID.
+	// Step 1: Tell the relay which exit peer to extend to.
 	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.ExtendHeader, exit.ID.String()); err != nil {
-		return nil, fmt.Errorf("write extend header: %v", err)
+		return nil, fmt.Errorf("write EXTEND header: %w", err)
 	}
 
-	// ECDH with relay — initiator sends its public key first.
+	// Step 2: ECDH with the relay.
 	relayKey, err := crypto.PerformECDH(stream)
 	if err != nil {
-		return nil, fmt.Errorf("ECDH with relay: %v", err)
+		return nil, fmt.Errorf("ECDH with relay: %w", err)
 	}
 
+	// relayConn: all traffic is encrypted with relayKey before hitting the wire.
 	relayConn := &libP2PConn{Conn: streamAdapter{stream}, Keys: [][]byte{relayKey}}
 
-	// Connect to Exit through Relay
+	// Step 3: Send the CONNECT command encrypted through the relay tunnel.
+	// The relay decrypts the outer layer and forwards inner bytes to the exit.
 	if _, err := fmt.Fprintf(relayConn, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
-		return nil, fmt.Errorf("write connect header: %v", err)
+		return nil, fmt.Errorf("write CONNECT header: %w", err)
 	}
 
-	// ECDH with Exit (through the relay proxy)
+	// Step 4: ECDH with the exit, proxied transparently through the relay.
 	exitKey, err := crypto.PerformECDH(relayConn)
 	if err != nil {
-		return nil, fmt.Errorf("ECDH with exit: %v", err)
+		return nil, fmt.Errorf("ECDH with exit: %w", err)
 	}
 
+	// Step 5: Nested conn — outer exitKey wrap sits on top of inner relayKey wrap.
+	//   Write: data → encrypt(exitKey) → encrypt(relayKey) → wire
+	//   Read:  wire → decrypt(relayKey) → decrypt(exitKey) → data
 	exitConn := &libP2PConn{Conn: relayConn, Keys: [][]byte{exitKey}}
-	cleanup = false
+	success = true
 	return exitConn, nil
 }
 
-// dialDirect builds a 1-hop Entry→Exit circuit.
+// dialDirect builds a 1-hop Entry→Exit circuit (fallback when no relays are available).
 func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, exitNode := range exits {
@@ -136,39 +155,50 @@ func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []pee
 		log.Printf("Direct circuit established to exit %s", exitNode.ID)
 		return conn, nil
 	}
-	return nil, fmt.Errorf("all %d exit node(s) failed: %v", len(exits), lastErr)
+	return nil, fmt.Errorf("all %d exit node(s) failed: %w", len(exits), lastErr)
 }
 
-// tryDirect attempts a direct Entry→Exit stream.
+// tryDirect opens a 1-hop encrypted stream directly to an exit node.
+//
+// Protocol:
+//  1. Connect to the exit node.
+//  2. Send "CONNECT\n<TargetAddr>\n" in plaintext.
+//  3. ECDH with the exit (Entry = INITIATOR) → sessionKey.
+//  4. Return a libP2PConn encrypted with sessionKey.
 func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, exitNode); err != nil {
-		return nil, fmt.Errorf("connect to exit: %v", err)
+		return nil, fmt.Errorf("connect to exit: %w", err)
 	}
 	stream, err := ds.Host.NewStream(ctx, exitNode.ID, config.ProtocolID)
 	if err != nil {
-		return nil, fmt.Errorf("open stream to exit: %v", err)
+		return nil, fmt.Errorf("open stream to exit: %w", err)
 	}
-	cleanup := true
+
+	success := false
 	defer func() {
-		if cleanup && stream != nil {
+		if !success {
 			stream.Reset()
 		}
 	}()
 
 	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
-		return nil, fmt.Errorf("write target addr: %v", err)
+		return nil, fmt.Errorf("write CONNECT header: %w", err)
 	}
 
 	sessionKey, err := crypto.PerformECDH(stream)
 	if err != nil {
-		return nil, fmt.Errorf("ECDH with exit: %v", err)
+		return nil, fmt.Errorf("ECDH with exit: %w", err)
 	}
 
-	cleanup = false
+	success = true
 	return &libP2PConn{Conn: streamAdapter{stream}, Keys: [][]byte{sessionKey}}, nil
 }
 
-// streamAdapter adapts a libp2p network.Stream to the net.Conn interface.
+// ─── Stream / Conn Adapters ──────────────────────────────────────────────────
+
+// streamAdapter makes a libp2p network.Stream satisfy net.Conn by adding
+// stub LocalAddr/RemoteAddr methods. libp2p streams expose full I/O but
+// intentionally omit these TCP-centric fields.
 type streamAdapter struct {
 	libp2pnet.Stream
 }
@@ -176,36 +206,51 @@ type streamAdapter struct {
 func (s streamAdapter) LocalAddr() net.Addr  { return &net.TCPAddr{} }
 func (s streamAdapter) RemoteAddr() net.Addr { return &net.TCPAddr{} }
 
-// libP2PConn wraps a net.Conn to provide multi-layered encryption/decryption (Onion Routing)
-// and frame sizing.
+// ─── libP2PConn ──────────────────────────────────────────────────────────────
+
+// libP2PConn wraps any net.Conn to provide layered onion encryption and
+// 4-byte big-endian length-prefix framing.
+//
+// In a 3-hop circuit the stack looks like:
+//
+//	exitConn  { Conn: relayConn,  Keys: [exitKey]  }
+//	relayConn { Conn: rawStream,  Keys: [relayKey] }
+//
+// A Write on exitConn encrypts with exitKey; relayConn re-encrypts with relayKey.
+// A Read on exitConn calls relayConn.Read (strips relayKey), then strips exitKey.
 type libP2PConn struct {
 	net.Conn
 	Keys     [][]byte
 	readBuf  []byte
-	frameBuf []byte // reusable buffer to avoid allocations
-	lenBuf   [4]byte
+	frameBuf []byte  // reused across reads to eliminate per-frame heap allocations
+	lenBuf   [4]byte // stack-allocated; avoids heap escape for the 4-byte length header
 }
 
+// Read decrypts the next onion frame and copies the plaintext into b.
+// Partial reads are buffered in readBuf and served on subsequent calls.
 func (c *libP2PConn) Read(b []byte) (int, error) {
-	// Serve buffered plaintext from a previous partial read if available.
+	// Drain any leftover plaintext from a prior partial read.
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
 		c.readBuf = c.readBuf[n:]
+		if len(c.readBuf) == 0 {
+			c.readBuf = nil // release backing array reference
+		}
 		return n, nil
 	}
 
-	// Step 1: Read the 4-byte big-endian frame length.
+	// Read the 4-byte big-endian frame length.
 	if _, err := io.ReadFull(c.Conn, c.lenBuf[:]); err != nil {
 		return 0, err
 	}
 	frameLen := binary.BigEndian.Uint32(c.lenBuf[:])
 
-	// Security: enforce max frame size (from config) to prevent OOM DoS.
+	// Enforce max frame size to prevent OOM-DoS attacks.
 	if frameLen > config.MaxFrameSize {
-		return 0, fmt.Errorf("frame length %d exceeds max frame size %d", frameLen, config.MaxFrameSize)
+		return 0, fmt.Errorf("frame length %d exceeds maximum %d: possible protocol violation", frameLen, config.MaxFrameSize)
 	}
 
-	// Step 2: Read exactly frameLen bytes. Reuse frameBuf to avoid allocations.
+	// Grow the reusable frameBuf only when the incoming frame is larger than any seen so far.
 	if uint32(cap(c.frameBuf)) < frameLen {
 		c.frameBuf = make([]byte, frameLen)
 	}
@@ -214,44 +259,43 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 		return 0, err
 	}
 
-	// Step 3: Decrypt the full frame using the per-session keys (Onion Unwrap).
+	// Peel each encryption layer in order (outermost first).
 	plaintext := frame
 	var err error
 	for _, key := range c.Keys {
 		plaintext, err = onion.UnwrapPayload(plaintext, key)
 		if err != nil {
-			return 0, fmt.Errorf("decryption failed: %v", err)
+			return 0, fmt.Errorf("decryption failed: %w", err)
 		}
 	}
 
-	// Step 4: Copy plaintext into the caller's buffer, saving any remainder.
 	n := copy(b, plaintext)
 	if n < len(plaintext) {
-		// Allocate a new buffer for the remainder, since plaintext shares memory with frameBuf
+		// plaintext aliases frameBuf; copy the tail so subsequent reads don't overwrite it.
 		c.readBuf = make([]byte, len(plaintext)-n)
 		copy(c.readBuf, plaintext[n:])
 	}
-
 	return n, nil
 }
 
-// Write encrypts the payload with the per-session keys and prepends a 4-byte length header.
+// Write encrypts b with all session keys and sends it as a single framed message:
+// [4-byte BE length][ciphertext].
+//
+// The length header and ciphertext are combined into one Write call to prevent
+// partial-write races where the peer receives the length but not the payload.
 func (c *libP2PConn) Write(b []byte) (int, error) {
 	ciphertext, err := onion.WrapPayload(b, c.Keys)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("encryption failed: %w", err)
 	}
 
-	// Prepend 4-byte big-endian length header.
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
+	// Combine length header + ciphertext into one contiguous buffer for an atomic write.
+	out := make([]byte, 4+len(ciphertext))
+	binary.BigEndian.PutUint32(out[:4], uint32(len(ciphertext)))
+	copy(out[4:], ciphertext)
 
-	if _, err := c.Conn.Write(lenBuf[:]); err != nil {
+	if _, err := c.Conn.Write(out); err != nil {
 		return 0, err
 	}
-	if _, err := c.Conn.Write(ciphertext); err != nil {
-		return 0, err
-	}
-	// Return the plaintext length to satisfy the net.Conn contract.
-	return len(b), nil
+	return len(b), nil // return plaintext length per net.Conn contract
 }

@@ -11,65 +11,69 @@ import (
 	"github.com/shadowlink/core/internal/socks5"
 )
 
-// MobileNode represents a running instance of ShadowLink on an iOS or Android device.
-// gomobile automatically exports this struct to Swift and Kotlin.
+// MobileNode represents a running ShadowLink entry node on iOS or Android.
+// gomobile exports this struct and its methods to Swift and Kotlin automatically.
 type MobileNode struct {
 	ds     *discovery.DiscoveryService
 	cancel context.CancelFunc
 }
 
-// StartEntryNode starts a ShadowLink entry node on the mobile device.
+// StartEntryNode starts a ShadowLink entry node and a local SOCKS5 proxy on
+// the given port. It is the entry point called by the Flutter MethodChannel when
+// the user taps "Connect".
 //
-// This is the entry point called by the Flutter MethodChannel when the user
-// taps "Connect". It initialises the DHT, builds circuits on demand, and
-// listens for SOCKS5 connections on the given port.
+// socksPort is int64 because gomobile maps Go int64 → Java long / Swift Int.
+// Use DefaultSOCKSPort() to get the standard value without hardcoding.
 //
-// NOTE: socksPort is int64 because gomobile maps Go int64 → Java long and Swift Int.
-// Use config.DefaultSOCKSPort (1080) as the standard value.
+// Passing socksPort=0 lets the OS assign a free port (useful for testing).
 func StartEntryNode(socksPort int64) (*MobileNode, error) {
+	if socksPort < 0 || socksPort > 65535 {
+		return nil, fmt.Errorf("mobile: socksPort %d out of range [0, 65535]", socksPort)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Port 0 lets the mobile OS dynamically assign a free P2P port.
-	// On mobile we do not connect to bootstrap peers — the device may be behind
-	// NAT and battery-sensitive; peers are discovered opportunistically.
+	// Port 0 lets the mobile OS assign a free P2P port.
+	// No bootstrap peers on mobile: the device may be behind strict NAT and
+	// is battery-sensitive; peers are discovered opportunistically instead.
 	ds, err := discovery.NewDiscoveryService(ctx, 0, nil)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to initialize discovery: %v", err)
+		return nil, fmt.Errorf("mobile: discovery service init failed: %w", err)
 	}
 
-	dialer := func(ctx context.Context, netwk, addr string) (net.Conn, error) {
-		return network.DialCircuit(ctx, ds, netwk, addr)
+	dialer := func(dialCtx context.Context, netwk, addr string) (net.Conn, error) {
+		return network.DialCircuit(dialCtx, ds, netwk, addr)
 	}
 
-	// Start the SOCKS5 proxy on the requested port.
 	proxy, err := socks5.NewServer(int(socksPort), dialer)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to init proxy: %v", err)
+		ds.Host.Close()
+		return nil, fmt.Errorf("mobile: SOCKS5 proxy init failed: %w", err)
 	}
 
 	go func() {
+		// ListenAndServe returns nil on clean shutdown (ctx cancelled).
 		if err := proxy.ListenAndServe(ctx); err != nil {
-			// Expected error on context cancellation; not fatal.
-			_ = err
+			// Unexpected error — log it. On mobile we cannot os.Exit.
+			fmt.Printf("mobile: SOCKS5 proxy exited with error: %v\n", err)
 		}
 	}()
 
-	return &MobileNode{
-		ds:     ds,
-		cancel: cancel,
-	}, nil
+	return &MobileNode{ds: ds, cancel: cancel}, nil
 }
 
-// DefaultSOCKSPort returns the default SOCKS5 proxy port used by this build.
-// Exposed via gomobile so host apps can read it without hardcoding.
+// DefaultSOCKSPort returns the standard SOCKS5 proxy port for this build.
+// Exposed via gomobile so host apps can read it without hardcoding the value.
 func DefaultSOCKSPort() int64 {
 	return int64(config.DefaultSOCKSPort)
 }
 
-// Stop cleanly disconnects from the dVPN network.
+// Stop cleanly shuts down the ShadowLink entry node:
+// it cancels all in-flight circuit dials and closes the libp2p host,
+// freeing the P2P port binding immediately.
 func (m *MobileNode) Stop() {
 	m.cancel()
-	m.ds.Host.Close()
+	_ = m.ds.Host.Close()
 }
