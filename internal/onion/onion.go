@@ -1,6 +1,7 @@
 package onion
 
 import (
+	"crypto/cipher"
 	"errors"
 	"fmt"
 
@@ -12,12 +13,6 @@ import (
 // Key ordering: keys[0] is the outermost layer (entry node), keys[len-1] is the
 // innermost layer (exit node). Encryption is applied from exit → entry so that
 // during routing, each node can peel exactly one layer.
-//
-// Example for a 3-hop circuit:
-//
-//	keys = [entryKey, relayKey, exitKey]
-//	wrap: Encrypt(exitKey, Encrypt(relayKey, Encrypt(entryKey, payload)))
-//	  → entry peels entryKey, relay peels relayKey, exit peels exitKey
 //
 // Returns an error if keys is empty (no encryption would be applied).
 func WrapPayload(payload []byte, keys [][]byte) ([]byte, error) {
@@ -37,6 +32,24 @@ func WrapPayload(payload []byte, keys [][]byte) ([]byte, error) {
 	return current, nil
 }
 
+// WrapPayloadWithCiphers wraps payload through pre-instantiated AEAD ciphers in reverse order.
+// Uses dst buffer to minimize allocations.
+func WrapPayloadWithCiphers(payload []byte, ciphers []cipher.AEAD, dst []byte) ([]byte, error) {
+	if len(ciphers) == 0 {
+		return nil, errors.New("onion: WrapPayloadWithCiphers requires at least one cipher")
+	}
+
+	current := payload
+	var err error
+	for i := len(ciphers) - 1; i >= 0; i-- {
+		current, err = crypto.EncryptWithAEAD(ciphers[i], current, dst)
+		if err != nil {
+			return nil, fmt.Errorf("onion: WrapPayloadWithCiphers at layer %d: %w", i, err)
+		}
+	}
+	return current, nil
+}
+
 // UnwrapPayload peels one layer of encryption from encryptedPayload using key.
 // Each node in the circuit calls this once with its own session key.
 func UnwrapPayload(encryptedPayload []byte, key []byte) ([]byte, error) {
@@ -46,6 +59,18 @@ func UnwrapPayload(encryptedPayload []byte, key []byte) ([]byte, error) {
 	plaintext, err := crypto.Decrypt(key, encryptedPayload)
 	if err != nil {
 		return nil, fmt.Errorf("onion: UnwrapPayload: %w", err)
+	}
+	return plaintext, nil
+}
+
+// UnwrapPayloadInPlace peels one layer of encryption in-place using a pre-initialized AEAD cipher.
+func UnwrapPayloadInPlace(encryptedPayload []byte, aead cipher.AEAD) ([]byte, error) {
+	if aead == nil {
+		return nil, errors.New("onion: UnwrapPayloadInPlace requires a non-nil cipher")
+	}
+	plaintext, err := crypto.DecryptWithAEADInPlace(aead, encryptedPayload)
+	if err != nil {
+		return nil, fmt.Errorf("onion: UnwrapPayloadInPlace: %w", err)
 	}
 	return plaintext, nil
 }

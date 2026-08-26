@@ -34,9 +34,8 @@ func StartEntryNode(socksPort int64) (*MobileNode, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Port 0 lets the mobile OS assign a free P2P port.
-	// No bootstrap peers on mobile: the device may be behind strict NAT and
-	// is battery-sensitive; peers are discovered opportunistically instead.
-	ds, err := discovery.NewDiscoveryService(ctx, 0, nil)
+	// Uses DefaultBootstrapPeers with bounded timeout to find DHT relay/exit nodes.
+	ds, err := discovery.NewDiscoveryService(ctx, 0, config.DefaultBootstrapPeers)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("mobile: discovery service init failed: %w", err)
@@ -49,7 +48,7 @@ func StartEntryNode(socksPort int64) (*MobileNode, error) {
 	proxy, err := socks5.NewServer(int(socksPort), dialer)
 	if err != nil {
 		cancel()
-		ds.Host.Close()
+		_ = ds.Host.Close()
 		return nil, fmt.Errorf("mobile: SOCKS5 proxy init failed: %w", err)
 	}
 

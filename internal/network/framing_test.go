@@ -45,7 +45,7 @@ func (p *pipeStream) Conn() libp2pnet.Conn            { return nil }
 func (p *pipeStream) Scope() libp2pnet.StreamScope    { return nil }
 
 // newStreamPair creates two connected pipeStreams backed by net.Pipe().
-func newStreamPair(t *testing.T) (*pipeStream, *pipeStream) {
+func newStreamPair(t testing.TB) (*pipeStream, *pipeStream) {
 	t.Helper()
 	c1, c2 := net.Pipe()
 	t.Cleanup(func() { c1.Close(); c2.Close() })
@@ -53,15 +53,15 @@ func newStreamPair(t *testing.T) (*pipeStream, *pipeStream) {
 }
 
 // makeLibP2PConnPair creates two connected libP2PConns with a shared symmetric key.
-func makeLibP2PConnPair(t *testing.T) (*libP2PConn, *libP2PConn) {
+func makeLibP2PConnPair(t testing.TB) (*libP2PConn, *libP2PConn) {
 	t.Helper()
 	s1, s2 := newStreamPair(t)
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	return &libP2PConn{Conn: streamAdapter{s1}, Keys: [][]byte{key}},
-		&libP2PConn{Conn: streamAdapter{s2}, Keys: [][]byte{key}}
+	return newLibP2PConn(streamAdapter{s1}, [][]byte{key}),
+		newLibP2PConn(streamAdapter{s2}, [][]byte{key})
 }
 
 // TestFraming_RoundTrip verifies encrypt→frame→transmit→deframe→decrypt works end-to-end.
@@ -133,8 +133,8 @@ func TestFraming_WrongKeyFails(t *testing.T) {
 	rightKey, _ := crypto.GenerateKey()
 	wrongKey, _ := crypto.GenerateKey()
 
-	writer := &libP2PConn{Conn: streamAdapter{s1}, Keys: [][]byte{rightKey}}
-	reader := &libP2PConn{Conn: streamAdapter{s2}, Keys: [][]byte{wrongKey}}
+	writer := newLibP2PConn(streamAdapter{s1}, [][]byte{rightKey})
+	reader := newLibP2PConn(streamAdapter{s2}, [][]byte{wrongKey})
 
 	done := make(chan error, 1)
 	go func() {
@@ -173,5 +173,21 @@ func TestFraming_LargePayload(t *testing.T) {
 
 	if !bytes.Equal(received, large) {
 		t.Error("large payload round-trip mismatch")
+	}
+}
+
+// BenchmarkFraming_Throughput_4KB measures the framing read/write throughput per operation.
+func BenchmarkFraming_Throughput_4KB(b *testing.B) {
+	writer, reader := makeLibP2PConnPair(b)
+	payload := make([]byte, 4096)
+	readBuf := make([]byte, 4096)
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		go func() {
+			_, _ = writer.Write(payload)
+		}()
+		_, _ = io.ReadFull(reader, readBuf)
 	}
 }

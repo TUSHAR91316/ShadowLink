@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -13,6 +14,15 @@ import (
 	"github.com/shadowlink/core/internal/crypto"
 	"github.com/shadowlink/core/internal/discovery"
 )
+
+// copyBufferPool recycles 32 KiB I/O buffers across all active bridge tunnels,
+// significantly reducing garbage collection overhead during high-concurrency routing.
+var copyBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
 
 // rawReadWriter combines a plain io.Reader with a plain io.Writer.
 // Used during ECDH so we write directly to the raw libp2p stream without
@@ -120,7 +130,7 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 	// upstreamConn strips the outer relayKey layer from entry frames.
 	// The resulting inner ciphertext is forwarded byte-for-byte to exitStream.
 	// The exit node decrypts the inner exitKey layer — relay never sees plaintext.
-	upstreamConn := &libP2PConn{Conn: streamAdapter{s}, Keys: [][]byte{relayKey}}
+	upstreamConn := newLibP2PConn(streamAdapter{s}, [][]byte{relayKey})
 	log.Printf("Relay: circuit active — bridging entry <-> exit %s", exitID)
 
 	bridge(upstreamConn, streamAdapter{exitStream})
@@ -144,8 +154,6 @@ func handleExit(s libp2pnet.Stream, targetAddr string) {
 	}
 
 	// Use a context-aware dialer so the exit dial respects shutdown signals.
-	// libp2p Stream does not expose a Context(), so we use the background context.
-	// The connection will be cleaned up when the stream is reset by bridge().
 	var d net.Dialer
 	outConn, err := d.DialContext(context.Background(), "tcp", targetAddr)
 	if err != nil {
@@ -155,20 +163,23 @@ func handleExit(s libp2pnet.Stream, targetAddr string) {
 	}
 	defer outConn.Close()
 
-	wrapper := &libP2PConn{Conn: streamAdapter{s}, Keys: [][]byte{sessionKey}}
+	wrapper := newLibP2PConn(streamAdapter{s}, [][]byte{sessionKey})
 	log.Printf("Exit: circuit active — proxying to %s", targetAddr)
 
 	bridge(wrapper, outConn)
 }
 
 // bridge proxies data bidirectionally between two net.Conn connections.
-// Two goroutines run io.Copy in parallel. When either direction closes or errors,
-// both connections are closed to guarantee the other goroutine terminates,
-// preventing goroutine leaks.
+// Two goroutines run io.CopyBuffer in parallel using pooled 32 KiB buffers.
+// When either direction closes or errors, both connections are closed to guarantee
+// the other goroutine terminates, preventing goroutine leaks.
 func bridge(a, b net.Conn) {
 	errc := make(chan error, 2)
 	copyDir := func(dst, src net.Conn) {
-		_, err := io.Copy(dst, src)
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		defer copyBufferPool.Put(bufPtr)
+
+		_, err := io.CopyBuffer(dst, src, *bufPtr)
 		errc <- err
 	}
 
@@ -203,7 +214,6 @@ func readLineRaw(r io.Reader) (string, error) {
 
 	for len(line) <= maxLineLen {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			// Return whatever was read alongside the error (e.g. io.EOF on clean close).
 			return strings.TrimSpace(string(line)), err
 		}
 		if buf[0] == '\n' {

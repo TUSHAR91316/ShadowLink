@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -25,7 +26,7 @@ type DiscoveryService struct {
 // and optionally connects to a list of well-known bootstrap peers.
 //
 // Pass listenPort=0 to let the OS assign a free port (recommended for mobile).
-// Pass bootstrapPeers=nil to skip bootstrap (useful for unit tests and mobile).
+// Pass bootstrapPeers=nil to skip bootstrap (useful for unit tests).
 func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []string) (*DiscoveryService, error) {
 	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", listenPort)
 
@@ -35,7 +36,9 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 		libp2p.ListenAddrStrings(listenAddr),
 		libp2p.Routing(func(h host.Host) (routing2.PeerRouting, error) {
 			var err error
-			idht, err = dht.New(ctx, h)
+			// ModeAuto dynamically adjusts between DHT client and full routing server,
+			// saving significant CPU and battery on client devices behind NAT.
+			idht, err = dht.New(ctx, h, dht.Mode(dht.ModeAuto))
 			return idht, err
 		}),
 	)
@@ -45,7 +48,7 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 
 	log.Printf("Host created: ID=%s, listening on %s", h.ID(), listenAddr)
 
-	// Connect to bootstrap peers concurrently for faster startup.
+	// Connect to bootstrap peers concurrently with bounded timeout for fast startup.
 	if len(bootstrapPeers) > 0 {
 		connectToBootstrapPeers(ctx, h, bootstrapPeers)
 	}
@@ -60,16 +63,12 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 	}, nil
 }
 
-// connectToBootstrapPeers dials all bootstrap peers in parallel and waits for
-// all goroutines to finish before returning.
-//
-// Previously this had a classic Go goroutine variable capture bug:
-//
-//	go func() { h.Connect(ctx, *peerinfo) }()
-//
-// where peerinfo was reused across loop iterations before the goroutine ran.
-// This is now fixed by passing peerinfo as a function argument.
+// connectToBootstrapPeers dials all bootstrap peers in parallel with a 10s timeout
+// so unreachable or slow peers do not delay overall node startup.
 func connectToBootstrapPeers(ctx context.Context, h host.Host, bootstrapPeers []string) {
+	bootCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	for _, peerAddr := range bootstrapPeers {
 		addr, err := multiaddr.NewMultiaddr(peerAddr)
@@ -84,11 +83,9 @@ func connectToBootstrapPeers(ctx context.Context, h host.Host, bootstrapPeers []
 		}
 
 		wg.Add(1)
-		// Pass peerinfo as an argument to the goroutine closure to avoid the
-		// loop-variable capture bug present in Go versions before 1.22.
 		go func(pi peer.AddrInfo) {
 			defer wg.Done()
-			if err := h.Connect(ctx, pi); err != nil {
+			if err := h.Connect(bootCtx, pi); err != nil {
 				log.Printf("Failed to connect to bootstrap node %s: %v", pi.ID, err)
 			} else {
 				log.Printf("Connected to bootstrap node: %s", pi.ID)

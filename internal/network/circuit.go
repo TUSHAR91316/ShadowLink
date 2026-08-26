@@ -2,15 +2,19 @@ package network
 
 import (
 	"context"
+	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net"
+	"sync"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"golang.org/x/crypto/chacha20poly1305"
+
 	"github.com/shadowlink/core/internal/config"
 	"github.com/shadowlink/core/internal/crypto"
 	"github.com/shadowlink/core/internal/discovery"
@@ -88,9 +92,6 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 //  4. Entry sends "CONNECT\n<TargetAddr>\n" encrypted with relayKey through relayConn.
 //  5. ECDH with the exit through the relay → exitKey.
 //  6. Return a nested libP2PConn: inner is relayConn (relayKey), outer adds exitKey.
-//
-// The exit node receives the CONNECT command + exitKey exchange decrypted from
-// the outer relay layer. The relay only strips the outer layer; it never sees plaintext.
 func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exit peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, relay); err != nil {
 		return nil, fmt.Errorf("connect to relay: %w", err)
@@ -120,10 +121,9 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 	}
 
 	// relayConn: all traffic is encrypted with relayKey before hitting the wire.
-	relayConn := &libP2PConn{Conn: streamAdapter{stream}, Keys: [][]byte{relayKey}}
+	relayConn := newLibP2PConn(streamAdapter{stream}, [][]byte{relayKey})
 
 	// Step 3: Send the CONNECT command encrypted through the relay tunnel.
-	// The relay decrypts the outer layer and forwards inner bytes to the exit.
 	if _, err := fmt.Fprintf(relayConn, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
 		return nil, fmt.Errorf("write CONNECT header: %w", err)
 	}
@@ -135,9 +135,7 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 	}
 
 	// Step 5: Nested conn — outer exitKey wrap sits on top of inner relayKey wrap.
-	//   Write: data → encrypt(exitKey) → encrypt(relayKey) → wire
-	//   Read:  wire → decrypt(relayKey) → decrypt(exitKey) → data
-	exitConn := &libP2PConn{Conn: relayConn, Keys: [][]byte{exitKey}}
+	exitConn := newLibP2PConn(relayConn, [][]byte{exitKey})
 	success = true
 	return exitConn, nil
 }
@@ -159,12 +157,6 @@ func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []pee
 }
 
 // tryDirect opens a 1-hop encrypted stream directly to an exit node.
-//
-// Protocol:
-//  1. Connect to the exit node.
-//  2. Send "CONNECT\n<TargetAddr>\n" in plaintext.
-//  3. ECDH with the exit (Entry = INITIATOR) → sessionKey.
-//  4. Return a libP2PConn encrypted with sessionKey.
 func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, exitNode); err != nil {
 		return nil, fmt.Errorf("connect to exit: %w", err)
@@ -191,7 +183,7 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 	}
 
 	success = true
-	return &libP2PConn{Conn: streamAdapter{stream}, Keys: [][]byte{sessionKey}}, nil
+	return newLibP2PConn(streamAdapter{stream}, [][]byte{sessionKey}), nil
 }
 
 // ─── Stream / Conn Adapters ──────────────────────────────────────────────────
@@ -211,24 +203,50 @@ func (s streamAdapter) RemoteAddr() net.Addr { return &net.TCPAddr{} }
 // libP2PConn wraps any net.Conn to provide layered onion encryption and
 // 4-byte big-endian length-prefix framing.
 //
-// In a 3-hop circuit the stack looks like:
-//
-//	exitConn  { Conn: relayConn,  Keys: [exitKey]  }
-//	relayConn { Conn: rawStream,  Keys: [relayKey] }
-//
-// A Write on exitConn encrypts with exitKey; relayConn re-encrypts with relayKey.
-// A Read on exitConn calls relayConn.Read (strips relayKey), then strips exitKey.
+// Key optimizations:
+//   - Pre-instantiated cipher.AEAD instances eliminate allocations per packet.
+//   - Reused frameBuf and writeBuf enable zero-allocation read and write pipelines.
 type libP2PConn struct {
 	net.Conn
 	Keys     [][]byte
+	ciphers  []cipher.AEAD
+	onceInit sync.Once
 	readBuf  []byte
 	frameBuf []byte  // reused across reads to eliminate per-frame heap allocations
+	writeBuf []byte  // reused across writes to eliminate per-frame heap allocations
 	lenBuf   [4]byte // stack-allocated; avoids heap escape for the 4-byte length header
+}
+
+// newLibP2PConn constructs a libP2PConn with pre-instantiated ciphers.
+func newLibP2PConn(conn net.Conn, keys [][]byte) *libP2PConn {
+	c := &libP2PConn{
+		Conn: conn,
+		Keys: keys,
+	}
+	c.initCiphers()
+	return c
+}
+
+func (c *libP2PConn) initCiphers() {
+	c.onceInit.Do(func() {
+		ciphers := make([]cipher.AEAD, len(c.Keys))
+		for i, k := range c.Keys {
+			if len(k) == chacha20poly1305.KeySize {
+				aead, err := chacha20poly1305.NewX(k)
+				if err == nil {
+					ciphers[i] = aead
+				}
+			}
+		}
+		c.ciphers = ciphers
+	})
 }
 
 // Read decrypts the next onion frame and copies the plaintext into b.
 // Partial reads are buffered in readBuf and served on subsequent calls.
 func (c *libP2PConn) Read(b []byte) (int, error) {
+	c.initCiphers()
+
 	// Drain any leftover plaintext from a prior partial read.
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
@@ -259,13 +277,26 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 		return 0, err
 	}
 
-	// Peel each encryption layer in order (outermost first).
+	// Peel each encryption layer in order (outermost first) using zero-allocation in-place decryption.
 	plaintext := frame
 	var err error
-	for _, key := range c.Keys {
-		plaintext, err = onion.UnwrapPayload(plaintext, key)
-		if err != nil {
-			return 0, fmt.Errorf("decryption failed: %w", err)
+	if len(c.ciphers) > 0 {
+		for i, aead := range c.ciphers {
+			if aead == nil {
+				plaintext, err = onion.UnwrapPayload(plaintext, c.Keys[i])
+			} else {
+				plaintext, err = onion.UnwrapPayloadInPlace(plaintext, aead)
+			}
+			if err != nil {
+				return 0, fmt.Errorf("decryption layer %d failed: %w", i, err)
+			}
+		}
+	} else {
+		for _, key := range c.Keys {
+			plaintext, err = onion.UnwrapPayload(plaintext, key)
+			if err != nil {
+				return 0, fmt.Errorf("decryption failed: %w", err)
+			}
 		}
 	}
 
@@ -281,21 +312,50 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 // Write encrypts b with all session keys and sends it as a single framed message:
 // [4-byte BE length][ciphertext].
 //
-// The length header and ciphertext are combined into one Write call to prevent
-// partial-write races where the peer receives the length but not the payload.
+// Optimized with reusable writeBuf to eliminate heap allocations per write.
 func (c *libP2PConn) Write(b []byte) (int, error) {
-	ciphertext, err := onion.WrapPayload(b, c.Keys)
+	c.initCiphers()
+
+	// Calculate needed buffer size for all cipher layers: 4 + len(b) + layers*(24+16)
+	overheadPerLayer := 40 // 24 nonce + 16 poly1305 tag
+	numLayers := len(c.Keys)
+	if numLayers == 0 {
+		return 0, fmt.Errorf("encryption failed: no session keys available")
+	}
+
+	needed := 4 + len(b) + numLayers*overheadPerLayer
+	if cap(c.writeBuf) < needed {
+		c.writeBuf = make([]byte, needed)
+	}
+
+	var ciphertext []byte
+	var err error
+
+	if len(c.ciphers) > 0 {
+		ciphertext, err = onion.WrapPayloadWithCiphers(b, c.ciphers, c.writeBuf[4:4])
+	} else {
+		ciphertext, err = onion.WrapPayload(b, c.Keys)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("encryption failed: %w", err)
 	}
 
-	// Combine length header + ciphertext into one contiguous buffer for an atomic write.
-	out := make([]byte, 4+len(ciphertext))
-	binary.BigEndian.PutUint32(out[:4], uint32(len(ciphertext)))
-	copy(out[4:], ciphertext)
+	// Write 4-byte big-endian length prefix directly before ciphertext.
+	binary.BigEndian.PutUint32(c.lenBuf[:], uint32(len(ciphertext)))
 
-	if _, err := c.Conn.Write(out); err != nil {
-		return 0, err
+	if len(c.writeBuf) >= 4+len(ciphertext) && &ciphertext[0] == &c.writeBuf[4] {
+		copy(c.writeBuf[:4], c.lenBuf[:])
+		if _, err := c.Conn.Write(c.writeBuf[:4+len(ciphertext)]); err != nil {
+			return 0, err
+		}
+	} else {
+		out := make([]byte, 4+len(ciphertext))
+		copy(out[:4], c.lenBuf[:])
+		copy(out[4:], ciphertext)
+		if _, err := c.Conn.Write(out); err != nil {
+			return 0, err
+		}
 	}
-	return len(b), nil // return plaintext length per net.Conn contract
+
+	return len(b), nil
 }

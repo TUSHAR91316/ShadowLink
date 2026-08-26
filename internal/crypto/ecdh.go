@@ -46,19 +46,19 @@ func doECDH(rw io.ReadWriter, initiator bool) ([]byte, error) {
 		return nil, fmt.Errorf("ecdh: key generation failed: %w", err)
 	}
 	ownPubBytes := privKey.PublicKey().Bytes() // always 32 bytes for X25519
-	peerPubBytes := make([]byte, X25519KeySize)
+	var peerPubBytes [X25519KeySize]byte
 
 	if initiator {
 		// Initiator sends its public key first, then waits for the peer's.
 		if _, err := rw.Write(ownPubBytes); err != nil {
 			return nil, fmt.Errorf("ecdh: failed to write public key: %w", err)
 		}
-		if _, err := io.ReadFull(rw, peerPubBytes); err != nil {
+		if _, err := io.ReadFull(rw, peerPubBytes[:]); err != nil {
 			return nil, fmt.Errorf("ecdh: failed to read peer public key: %w", err)
 		}
 	} else {
 		// Responder reads the initiator's public key first, then sends its own.
-		if _, err := io.ReadFull(rw, peerPubBytes); err != nil {
+		if _, err := io.ReadFull(rw, peerPubBytes[:]); err != nil {
 			return nil, fmt.Errorf("ecdh: failed to read peer public key: %w", err)
 		}
 		if _, err := rw.Write(ownPubBytes); err != nil {
@@ -66,7 +66,7 @@ func doECDH(rw io.ReadWriter, initiator bool) ([]byte, error) {
 		}
 	}
 
-	peerKey, err := curve.NewPublicKey(peerPubBytes)
+	peerKey, err := curve.NewPublicKey(peerPubBytes[:])
 	if err != nil {
 		return nil, fmt.Errorf("ecdh: invalid peer public key: %w", err)
 	}

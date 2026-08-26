@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"crypto/cipher"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -22,18 +23,30 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("chacha20poly1305 init: %w", err)
 	}
 
-	// Allocate the output in one shot: nonce || ciphertext || tag.
-	nonceSize := aead.NonceSize()
-	out := make([]byte, nonceSize+len(plaintext)+aead.Overhead())
-	nonce := out[:nonceSize]
+	return EncryptWithAEAD(aead, plaintext, nil)
+}
 
+// EncryptWithAEAD writes [24-byte nonce][ciphertext + 16-byte tag] into dst.
+// If dst has sufficient capacity (len(plaintext) + 40), no heap allocation occurs.
+func EncryptWithAEAD(aead cipher.AEAD, plaintext, dst []byte) ([]byte, error) {
+	nonceSize := aead.NonceSize()
+	overhead := aead.Overhead()
+	needed := nonceSize + len(plaintext) + overhead
+
+	if cap(dst) < needed {
+		dst = make([]byte, needed)
+	} else {
+		dst = dst[:needed]
+	}
+
+	nonce := dst[:nonceSize]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("nonce generation: %w", err)
 	}
 
-	// Seal appends ciphertext+tag directly after the nonce in out.
-	aead.Seal(out[nonceSize:nonceSize], nonce, plaintext, nil)
-	return out, nil
+	// Seal writes ciphertext + 16-byte tag directly after nonce in dst.
+	aead.Seal(dst[nonceSize:nonceSize], nonce, plaintext, nil)
+	return dst, nil
 }
 
 // Decrypt verifies and decrypts data produced by Encrypt.
@@ -48,6 +61,12 @@ func Decrypt(key, encrypted []byte) ([]byte, error) {
 		return nil, fmt.Errorf("chacha20poly1305 init: %w", err)
 	}
 
+	return DecryptWithAEADInPlace(aead, encrypted)
+}
+
+// DecryptWithAEADInPlace verifies and decrypts data in-place using an existing AEAD instance.
+// The plaintext is written directly into encrypted[nonceSize:], eliminating heap allocation.
+func DecryptWithAEADInPlace(aead cipher.AEAD, encrypted []byte) ([]byte, error) {
 	nonceSize := aead.NonceSize()
 	minLen := nonceSize + aead.Overhead()
 	if len(encrypted) < minLen {
@@ -55,7 +74,8 @@ func Decrypt(key, encrypted []byte) ([]byte, error) {
 	}
 
 	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
-	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+	// Decrypt in-place into ciphertext[:0] without heap allocations
+	plaintext, err := aead.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil {
 		// Do not expose the raw AEAD error — it may leak timing information.
 		return nil, errors.New("decryption failed: authentication tag mismatch or data tampered")

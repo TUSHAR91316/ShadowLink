@@ -130,3 +130,30 @@ func TestEncryptDecrypt_LargePayload(t *testing.T) {
 		t.Error("large payload round-trip mismatch")
 	}
 }
+
+// --- Benchmarks ---
+
+func BenchmarkEncrypt_1KB(b *testing.B) {
+	key, _ := GenerateKey()
+	data := make([]byte, 1024)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, _ = Encrypt(key, data)
+	}
+}
+
+func BenchmarkDecrypt_1KB(b *testing.B) {
+	key, _ := GenerateKey()
+	data := make([]byte, 1024)
+	ct, _ := Encrypt(key, data)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		// Make a copy so in-place decrypt doesn't corrupt subsequent runs
+		ctCopy := append([]byte(nil), ct...)
+		_, _ = Decrypt(key, ctCopy)
+	}
+}
