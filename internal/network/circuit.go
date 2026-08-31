@@ -3,11 +3,12 @@ package network
 import (
 	"context"
 	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
+	"math/big"
 	"net"
 	"sync"
 
@@ -21,14 +22,28 @@ import (
 	"github.com/shadowlink/core/internal/onion"
 )
 
+// cryptoShuffle performs a cryptographically secure Fisher-Yates shuffle using crypto/rand
+// to eliminate selection bias and prevent passive traffic analysis attacks against routing paths.
+func cryptoShuffle[T any](slice []T) {
+	for i := len(slice) - 1; i > 0; i-- {
+		nBig, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			continue
+		}
+		j := int(nBig.Int64())
+		slice[i], slice[j] = slice[j], slice[i]
+	}
+}
+
 // DialCircuit builds a multi-hop encrypted circuit through the dVPN network.
 //
 // Circuit selection logic:
 //   - If relay nodes are available: Entry → Relay → Exit (3-hop, preferred)
 //   - If no relays are available:   Entry → Exit (1-hop, fallback)
 //
-// Relay and exit peers are selected randomly (Fisher-Yates shuffle) to prevent
-// a traffic analysis attack where a passive observer could predict the routing path.
+// Relay and exit peers are selected using cryptographically secure Fisher-Yates
+// shuffling to prevent a traffic analysis attack where a passive observer could
+// predict the routing path.
 //
 // The 3-hop path uses true Onion Routing: the Entry node independently negotiates
 // ECDH session keys with both the Relay and the Exit node. The Relay never sees
@@ -40,13 +55,13 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 	if err != nil || len(exits) == 0 {
 		return nil, fmt.Errorf("no exit nodes found in DHT: %w", err)
 	}
-	// Shuffle exit list to randomise routing and avoid selection bias.
-	rand.Shuffle(len(exits), func(i, j int) { exits[i], exits[j] = exits[j], exits[i] })
+	// Cryptographically shuffle exit list to randomise routing.
+	cryptoShuffle(exits)
 
 	// Prefer 3-hop routing through a relay node.
 	relays, _ := ds.FindPeers(ctx, config.RendezvousRelay)
 	if len(relays) > 0 {
-		rand.Shuffle(len(relays), func(i, j int) { relays[i], relays[j] = relays[j], relays[i] })
+		cryptoShuffle(relays)
 		log.Printf("Found %d relay(s) and %d exit(s) — attempting 3-hop circuit", len(relays), len(exits))
 		conn, err := dialViaRelay(ctx, ds, relays, exits, targetAddr)
 		if err == nil {
@@ -343,7 +358,7 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 	// Write 4-byte big-endian length prefix directly before ciphertext.
 	binary.BigEndian.PutUint32(c.lenBuf[:], uint32(len(ciphertext)))
 
-	if len(c.writeBuf) >= 4+len(ciphertext) && &ciphertext[0] == &c.writeBuf[4] {
+	if len(ciphertext) > 0 && len(c.writeBuf) >= 4+len(ciphertext) && &ciphertext[0] == &c.writeBuf[4] {
 		copy(c.writeBuf[:4], c.lenBuf[:])
 		if _, err := c.Conn.Write(c.writeBuf[:4+len(ciphertext)]); err != nil {
 			return 0, err

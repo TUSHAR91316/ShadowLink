@@ -33,16 +33,21 @@ func WrapPayload(payload []byte, keys [][]byte) ([]byte, error) {
 }
 
 // WrapPayloadWithCiphers wraps payload through pre-instantiated AEAD ciphers in reverse order.
-// Uses dst buffer to minimize allocations.
+// When a single cipher is provided, dst is used directly with zero allocations.
 func WrapPayloadWithCiphers(payload []byte, ciphers []cipher.AEAD, dst []byte) ([]byte, error) {
 	if len(ciphers) == 0 {
 		return nil, errors.New("onion: WrapPayloadWithCiphers requires at least one cipher")
 	}
 
+	if len(ciphers) == 1 {
+		return crypto.EncryptWithAEAD(ciphers[0], payload, dst)
+	}
+
+	// For multi-layer wrapping, sequentially wrap to avoid buffer overlap corruption.
 	current := payload
 	var err error
 	for i := len(ciphers) - 1; i >= 0; i-- {
-		current, err = crypto.EncryptWithAEAD(ciphers[i], current, dst)
+		current, err = crypto.EncryptWithAEAD(ciphers[i], current, nil)
 		if err != nil {
 			return nil, fmt.Errorf("onion: WrapPayloadWithCiphers at layer %d: %w", i, err)
 		}
