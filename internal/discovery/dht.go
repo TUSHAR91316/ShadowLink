@@ -16,10 +16,21 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+// peerCacheTTL is the duration for which discovered DHT peers are cached.
+// Caching eliminates expensive DHT round-trips for consecutive SOCKS5 connections.
+const peerCacheTTL = 45 * time.Second
+
+type peerCacheEntry struct {
+	peers     []peer.AddrInfo
+	timestamp time.Time
+}
+
 // DiscoveryService wraps a libp2p host and a Kademlia DHT for peer discovery.
 type DiscoveryService struct {
-	Host host.Host
-	DHT  *dht.IpfsDHT
+	Host       host.Host
+	DHT        *dht.IpfsDHT
+	peerCache  map[string]peerCacheEntry
+	cacheMutex sync.RWMutex
 }
 
 // NewDiscoveryService initialises a new libp2p host, bootstraps the Kad DHT,
@@ -58,8 +69,9 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 	}
 
 	return &DiscoveryService{
-		Host: h,
-		DHT:  idht,
+		Host:      h,
+		DHT:       idht,
+		peerCache: make(map[string]peerCacheEntry),
 	}, nil
 }
 
@@ -109,8 +121,20 @@ func (d *DiscoveryService) Announce(ctx context.Context, rendezvous string) erro
 }
 
 // FindPeers discovers other nodes announcing a specific rendezvous string.
-// Self-connections and peers with no addresses are filtered out.
+// Results are cached in-memory with a 45s TTL to prevent DHT query saturation
+// on bursty connection requests (e.g. web browser page loads).
 func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]peer.AddrInfo, error) {
+	// Check cache first
+	d.cacheMutex.RLock()
+	entry, found := d.peerCache[rendezvous]
+	if found && time.Since(entry.timestamp) < peerCacheTTL && len(entry.peers) > 0 {
+		cached := make([]peer.AddrInfo, len(entry.peers))
+		copy(cached, entry.peers)
+		d.cacheMutex.RUnlock()
+		return cached, nil
+	}
+	d.cacheMutex.RUnlock()
+
 	routingDiscovery := routing.NewRoutingDiscovery(d.DHT)
 
 	peerChan, err := routingDiscovery.FindPeers(ctx, rendezvous)
@@ -126,5 +150,37 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 		}
 		peers = append(peers, p)
 	}
-	return peers, nil
+
+	// Update cache
+	d.cacheMutex.Lock()
+	d.peerCache[rendezvous] = peerCacheEntry{
+		peers:     peers,
+		timestamp: time.Now(),
+	}
+	d.cacheMutex.Unlock()
+
+	res := make([]peer.AddrInfo, len(peers))
+	copy(res, peers)
+	return res, nil
+}
+
+// InvalidatePeer removes a failed peer from the in-memory cache so subsequent dials
+// do not repeatedly attempt to route through a dead or unreachable node.
+func (d *DiscoveryService) InvalidatePeer(rendezvous string, id peer.ID) {
+	d.cacheMutex.Lock()
+	defer d.cacheMutex.Unlock()
+
+	entry, found := d.peerCache[rendezvous]
+	if !found {
+		return
+	}
+
+	filtered := make([]peer.AddrInfo, 0, len(entry.peers))
+	for _, p := range entry.peers {
+		if p.ID != id {
+			filtered = append(filtered, p)
+		}
+	}
+	entry.peers = filtered
+	d.peerCache[rendezvous] = entry
 }

@@ -145,7 +145,7 @@ class DaemonService {
 
       _process!.stdout.listen((data) {
         final line = String.fromCharCodes(data);
-        logNotifier.value += line;
+        _appendLog(line);
         // Detect connection success from daemon stdout.
         if (line.contains('Starting local SOCKS5 proxy') ||
             line.contains('Announce')) {
@@ -155,20 +155,32 @@ class DaemonService {
       });
 
       _process!.stderr.listen((data) {
-        logNotifier.value += 'ERROR: ${String.fromCharCodes(data)}';
+        _appendLog('ERROR: ${String.fromCharCodes(data)}');
       });
 
       _process!.exitCode.then((code) {
         _connectionTimeout?.cancel();
-        logNotifier.value += '\nDaemon exited with code $code';
+        _appendLog('\nDaemon exited with code $code');
         statusNotifier.value = DaemonStatus.disconnected;
         _process = null;
       });
     } catch (e) {
       _connectionTimeout?.cancel();
       statusNotifier.value = DaemonStatus.error;
-      logNotifier.value += '\nFailed to start daemon: $e';
+      _appendLog('\nFailed to start daemon: $e');
       _process = null;
+    }
+  }
+
+  /// Appends text to logNotifier while enforcing a 20,000 character sliding window
+  /// to prevent unbounded memory growth over prolonged uptime.
+  void _appendLog(String text) {
+    const int maxLogLength = 20000;
+    final current = logNotifier.value + text;
+    if (current.length > maxLogLength) {
+      logNotifier.value = current.substring(current.length - maxLogLength);
+    } else {
+      logNotifier.value = current;
     }
   }
 

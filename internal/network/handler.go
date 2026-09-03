@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -41,6 +42,10 @@ type rawReadWriter struct {
 func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *discovery.DiscoveryService) {
 	log.Printf("Incoming stream from %s (local role: %s)", s.Conn().RemotePeer(), role)
 	defer s.Close()
+
+	// Enforce a 15-second handshake deadline on the initial control command
+	// to prevent slow-loris connection stalling.
+	_ = s.SetDeadline(time.Now().Add(15 * time.Second))
 
 	// Read one byte at a time — bufio would pre-fetch past the newline into the
 	// raw ECDH public-key bytes, permanently corrupting the handshake.
@@ -126,6 +131,10 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 	}
 	defer exitStream.Close()
 
+	// Clear handshake deadlines on both streams for unrestricted payload bridging.
+	_ = s.SetDeadline(time.Time{})
+	_ = exitStream.SetDeadline(time.Time{})
+
 	// Step 3: Bridge.
 	// upstreamConn strips the outer relayKey layer from entry frames.
 	// The resulting inner ciphertext is forwarded byte-for-byte to exitStream.
@@ -153,9 +162,15 @@ func handleExit(s libp2pnet.Stream, targetAddr string) {
 		return
 	}
 
-	// Use a context-aware dialer so the exit dial respects shutdown signals.
+	// Clear stream deadline for data streaming.
+	_ = s.SetDeadline(time.Time{})
+
+	// Use a context-aware dialer with connection timeout.
 	var d net.Dialer
-	outConn, err := d.DialContext(context.Background(), "tcp", targetAddr)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer dialCancel()
+
+	outConn, err := d.DialContext(dialCtx, "tcp", targetAddr)
 	if err != nil {
 		log.Printf("Exit: failed to dial %s: %v", targetAddr, err)
 		s.Reset() //nolint:errcheck

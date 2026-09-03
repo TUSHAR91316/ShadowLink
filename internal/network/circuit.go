@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"time"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -21,6 +22,9 @@ import (
 	"github.com/shadowlink/core/internal/discovery"
 	"github.com/shadowlink/core/internal/onion"
 )
+
+// handshakeTimeout bounds circuit negotiation so unresponsive peers fail fast.
+const handshakeTimeout = 15 * time.Second
 
 // cryptoShuffle performs a cryptographically secure Fisher-Yates shuffle using crypto/rand
 // to eliminate selection bias and prevent passive traffic analysis attacks against routing paths.
@@ -89,6 +93,8 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 			if err != nil {
 				log.Printf("Relay %s -> Exit %s failed: %v", relay.ID, exit.ID, err)
 				lastErr = err
+				// Evict dead nodes from peer cache to prevent repeated failed retries
+				ds.InvalidatePeer(config.RendezvousRelay, relay.ID)
 				continue
 			}
 			log.Printf("3-hop circuit established: Entry -> %s -> %s -> Target", relay.ID, exit.ID)
@@ -115,6 +121,9 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 	if err != nil {
 		return nil, fmt.Errorf("open stream to relay: %w", err)
 	}
+
+	// Set deadline during circuit handshake so unresponsive peers fail fast.
+	_ = stream.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	// resetOnError ensures the underlying stream is always torn down on failure.
 	success := false
@@ -149,6 +158,9 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 		return nil, fmt.Errorf("ECDH with exit: %w", err)
 	}
 
+	// Clear handshake deadline for normal streaming transfer.
+	_ = stream.SetDeadline(time.Time{})
+
 	// Step 5: Nested conn — outer exitKey wrap sits on top of inner relayKey wrap.
 	exitConn := newLibP2PConn(relayConn, [][]byte{exitKey})
 	success = true
@@ -163,6 +175,7 @@ func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []pee
 		if err != nil {
 			log.Printf("Exit node %s failed: %v, trying next...", exitNode.ID, err)
 			lastErr = err
+			ds.InvalidatePeer(config.RendezvousExit, exitNode.ID)
 			continue
 		}
 		log.Printf("Direct circuit established to exit %s", exitNode.ID)
@@ -181,6 +194,8 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 		return nil, fmt.Errorf("open stream to exit: %w", err)
 	}
 
+	_ = stream.SetDeadline(time.Now().Add(handshakeTimeout))
+
 	success := false
 	defer func() {
 		if !success {
@@ -196,6 +211,9 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 	if err != nil {
 		return nil, fmt.Errorf("ECDH with exit: %w", err)
 	}
+
+	// Clear handshake deadline
+	_ = stream.SetDeadline(time.Time{})
 
 	success = true
 	return newLibP2PConn(streamAdapter{stream}, [][]byte{sessionKey}), nil
