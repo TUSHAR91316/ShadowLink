@@ -16,10 +16,11 @@ graph TD
         SysProxy["OS System Proxy Settings\n(Windows Registry / Mobile VPN)"]
     end
 
-    subgraph "Decentralized P2P Network (libp2p DHT)"
+    subgraph "Decentralized P2P Network (libp2p DHT & Cache)"
+        PeerCache["Thread-Safe Peer Cache\n(45s TTL, Instant Eviction)"]
         RelayNode["Relay Node (Hop 1)\nBlind Routing Intermediate"]
         ExitNode["Exit Node (Hop 2)\nInternet Egress Gateway"]
-        DHT["Kademlia DHT\n(Autonomous Discovery)"]
+        DHT["Kademlia DHT (ModeAuto)\n(Autonomous Discovery)"]
     end
 
     Internet(("Public Internet Target\n(e.g., example.com:443)"))
@@ -30,20 +31,21 @@ graph TD
     SysProxy -->|"Redirects network traffic"| SOCKS
     SOCKS -->|"Custom Dialer (DialCircuit)"| Core
 
-    Core <-->|"FindPeers / Announce"| DHT
+    Core <-->|"Check Cache (<1ms) / DHT Query"| PeerCache
+    PeerCache <-->|"Refresh expired peers"| DHT
     RelayNode <-->|"Announce('shadowlink-relay')"| DHT
     ExitNode <-->|"Announce('shadowlink-exit')"| DHT
 
     Core -->|"Outer Wrap: Encrypt(RelayKey)"| RelayNode
     RelayNode -->|"Inner Wrap: Encrypt(ExitKey)"| ExitNode
-    ExitNode -->|"TCP Dial"| Internet
+    ExitNode -->|"TCP Dial (15s Timeout)"| Internet
 ```
 
 ---
 
 ## 2. True Onion Routing: Circuit Negotiation Protocol
 
-Every connection generates independent, ephemeral **X25519 ECDH** key pairs with **HKDF-SHA256** domain separation. Forward secrecy is absolute: keys are never written to disk or reused across circuits.
+Every connection generates independent, ephemeral **X25519 ECDH** key pairs with **HKDF-SHA256** domain separation. Forward secrecy is absolute: keys are never written to disk or reused across circuits. All handshake and dial operations are bound by a strict **15-second deadline** (`handshakeTimeout`) to eliminate slow-loris attacks and hanging remote peers.
 
 ```mermaid
 sequenceDiagram
@@ -53,18 +55,18 @@ sequenceDiagram
     participant X as Exit Node (Egress)
     participant I as Target Internet Host
 
-    Note over E,R: Phase 1 — Entry to Relay Handshake
+    Note over E,R: Phase 1 — Entry to Relay Handshake [15s Deadline]
     E->>R: Stream Open: "EXTEND\n<ExitPeerID>\n"
     E->>R: X25519 Public Key (32 bytes) [Initiator]
     R->>E: X25519 Public Key (32 bytes) [Responder]
     Note over E,R: Both derive shared secret: RelayKey (via HKDF-SHA256)
 
-    Note over R,X: Phase 2 — Relay Bridges to Exit
+    Note over R,X: Phase 2 — Relay Bridges to Exit [15s Deadline]
     R->>X: DHT Lookup & Connect to ExitPeerID
     R->>X: Stream Open (/shadowlink/1.0.0)
-    Note over R: Relay establishes transparent bidirectional bridge
+    Note over R: Relay establishes transparent bidirectional bridge (32 KiB sync.Pool)
 
-    Note over E,X: Phase 3 — End-to-End Entry to Exit Handshake (Through Relay)
+    Note over E,X: Phase 3 — End-to-End Entry to Exit Handshake (Through Relay) [15s Deadline]
     E->>R: Encrypt(RelayKey, "CONNECT\n<TargetAddr>\n")
     R->>X: Decrypt(RelayKey) → Forwards "CONNECT\n<TargetAddr>\n"
     E->>R: Encrypt(RelayKey, X25519 Public Key [32 bytes])
@@ -73,19 +75,20 @@ sequenceDiagram
     R->>E: Encrypt(RelayKey, X25519 Public Key)
     Note over E,X: Both derive shared secret: ExitKey (via HKDF-SHA256)
 
-    Note over E,I: Phase 4 — Double-Encrypted Onion Data Tunnel
+    Note over E,X: Clear Handshake Deadlines → Enter Streaming Mode
+    Note over E,I: Phase 4 — Double-Encrypted Onion Data Tunnel (>1.15 GB/s Throughput)
     E->>E: Payload → Encrypt(ExitKey) → Encrypt(RelayKey) → Prepend 4-byte FrameLen
     E->>R: [Length Header][Double Encrypted Frame]
-    R->>R: Reads Frame → Decrypt(RelayKey) → Yields [Single Encrypted Frame]
+    R->>R: Reads Frame → DecryptInPlace(RelayKey) → Yields [Single Encrypted Frame]
     R->>X: Forwards [Single Encrypted Frame] (Relay NEVER sees plaintext)
-    X->>X: Decrypt(ExitKey) → Yields Original Payload
+    X->>X: DecryptInPlace(ExitKey) → Yields Original Payload
     X->>I: TCP connect & transfer to TargetAddr
     I->>X: Response Data
     X->>X: Encrypt(ExitKey, Response)
     X->>R: Forwards [Single Encrypted Frame]
     R->>R: Encrypt(RelayKey, Frame)
     R->>E: Forwards [Double Encrypted Frame]
-    E->>E: Decrypt(RelayKey) → Decrypt(ExitKey) → Original Response
+    E->>E: DecryptInPlace(RelayKey) → DecryptInPlace(ExitKey) → Original Response
 ```
 
 ---
@@ -101,7 +104,7 @@ sequenceDiagram
 
 ---
 
-## 4. Serverless Peer Discovery (Kademlia DHT)
+## 4. Serverless Peer Discovery & Caching (Kademlia DHT)
 
 ```mermaid
 graph LR
@@ -115,13 +118,18 @@ graph LR
     Exit1["Exit Peer 1"] -->|Advertise| ExitRendezvous
     Exit2["Exit Peer 2"] -->|Advertise| ExitRendezvous
 
-    Client["Entry Client"] -->|FindPeers| RelayRendezvous
-    Client -->|FindPeers| ExitRendezvous
+    Client["Entry Client"] -->|FindPeers| PeerCache["Thread-Safe PeerCache\n(45s TTL, RWMutex)"]
+    PeerCache -->|Cache Miss| RelayRendezvous
+    PeerCache -->|Cache Miss| ExitRendezvous
+    PeerCache -->|Evict on Dial Failure| InvalidatePeer["InvalidatePeer()"]
 ```
 
-1. **Bootstrap Phase**: The node dials multiaddresses of well-known decentralized seed peers (`DefaultBootstrapPeers`).
-2. **Advertisement Phase**: Relays and Exits advertise their respective roles to the Kad-DHT routing table.
-3. **Discovery Phase**: Entry nodes query the DHT for active peers, shuffle results using Fisher-Yates randomization to eliminate traffic analysis bias, and dial circuits on demand.
+1. **Bootstrap Phase**: The node dials multiaddresses of well-known decentralized seed peers (`DefaultBootstrapPeers`) under a 10-second timeout context.
+2. **Auto-Mode Routing**: The discovery service activates `dht.ModeAuto`, allowing the node to dynamically determine whether to run as a full DHT routing table server or client based on public NAT reachability.
+3. **Advertisement Phase**: Relays and Exits advertise their respective roles to the Kad-DHT routing table.
+4. **Sub-Millisecond Peer Caching**: Discovered peers are stored in an in-memory `peerCache` protected by a `sync.RWMutex` with a 45-second Time-To-Live (TTL). Subsequent connection requests (such as parallel browser asset requests) resolve cached peers in **<1ms** instead of triggering repetitive 1–2 second Kad-DHT traversals.
+5. **Instant Failure Eviction**: When a circuit dial attempt to a relay or exit fails, `ds.InvalidatePeer(peerID)` is called immediately to purge the unreachable node from the cache without waiting for TTL expiration.
+6. **Cryptographically Secure Shuffling**: Candidate peer lists are randomized via `cryptoShuffle()` using `crypto/rand.Int`. This eliminates pseudo-random number generator (PRNG) state observation attacks, guaranteeing uniform non-deterministic circuit path selection.
 
 ---
 
@@ -147,10 +155,13 @@ graph LR
 ### Framing & Zero-Allocation Memory Model
 All frames transmitted through `libP2PConn` follow a strict binary layout:
 ```
-[4 Bytes Big-Endian Length Prefix][N Bytes XChaCha20-Poly1305 Ciphertext + 16 Byte Tag]
+[4 Bytes Big-Endian Length Prefix][24-Byte Nonce][Ciphertext Payload][16-Byte Poly1305 Tag]
 ```
 - **Max Frame Cap**: Individual frames are capped at `MaxFrameSize` (128 KiB) to prevent Out-Of-Memory (OOM) DoS attacks.
-- **Zero Allocations on Read**: The connection wrapper reuses a pre-allocated internal buffer (`frameBuf`), preventing garbage collection thrashing during sustained high-bandwidth operations.
+- **Zero-Allocation In-Place Decryption**: During frame reads, `DecryptWithAEADInPlace` and `UnwrapPayloadInPlace` peel cryptographic layers directly inside the pre-allocated slice buffer, eliminating heap allocations and achieving **>1.15 GB/s** decryption throughput per CPU core.
+- **Contiguous Wrap Allocations**: Outbound layered onion wrapping pre-allocates an exact single-buffer envelope per layer (`WrapPayloadWithCiphers`), preventing slice aliasing and memory corruption between concentric layers.
+- **Pooled Stream Bridging**: The bi-directional forwarding engine in `bridge()` uses a `sync.Pool` of 32 KiB byte slices (`copyBufferPool`) with `io.CopyBuffer`, eliminating runtime GC churn during high-bandwidth proxying.
+- **Atomic Wire Writes**: The 4-byte big-endian frame length header and encrypted payload are serialized into a single atomic write call to prevent partial-packet TCP segmentation races.
 
 ---
 
@@ -160,7 +171,8 @@ All frames transmitted through `libP2PConn` follow a strict binary layout:
 graph TD
     subgraph "Desktop Platforms (Windows / macOS / Linux)"
         FlutterDesktop["Flutter Desktop GUI"] -->|"Process.start(args)"| DaemonProcess["Go Daemon Binary (shadowlink.exe)"]
-        DaemonProcess -->|"Real-time stdout log streaming"| FlutterDesktop
+        DaemonProcess -->|"Stdout log stream"| FlutterDesktop
+        FlutterDesktop -->|"Sliding Window Log Cap (20,000 chars)"| TelemetryBuffer["Bounded In-Memory Buffer"]
         FlutterDesktop -->|"Process.kill() + --reset-proxy failsafe"| DaemonProcess
     end
 
@@ -169,6 +181,9 @@ graph TD
         MobileBindings -->|"In-process libp2p Host & SOCKS5"| NetworkInterface["Local Network Loopback"]
     end
 ```
+
+### Memory-Safe Telemetry Streaming
+Desktop GUI telemetry continuously consumes stdout from the Go daemon. To prevent unbounded heap consumption during multi-day sessions, `DaemonService` enforces a strict **sliding window cap of 20,000 characters** on `logNotifier`, retaining the most recent operational logs while discarding older log entries.
 
 ---
 

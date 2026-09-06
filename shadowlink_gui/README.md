@@ -28,7 +28,7 @@ graph TD
 
 - **Cyber Aesthetic UI**: Custom design system utilizing deep dark surfaces, vibrant cyan accents, and smooth micro-animations.
 - **Dynamic Role Management**: Switch between Client (Entry), Relay, and Exit node configurations on desktop.
-- **Live Terminal Telemetry**: Real-time log capture and stream parsing directly from the Go engine.
+- **Live Terminal Telemetry**: Real-time log capture and stream parsing with a bounded sliding window buffer (20,000 characters) to prevent memory growth during prolonged runtime.
 - **Failsafe System Proxy**: On desktop abnormal exit, invokes `shadowlink --reset-proxy` to prevent internet disconnection.
 - **Strict Legal Compliance**: Enforces non-skippable EULA acceptance before initializing any networking operations.
 
