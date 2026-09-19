@@ -22,7 +22,14 @@
 - **Stream Bridge Buffer Pooling**: Bi-directional proxy forwarding in `bridge()` now uses a 32 KiB `sync.Pool` (`copyBufferPool`) with `io.CopyBuffer`, eliminating GC thrashing during continuous high-throughput transfers.
 - **Atomic Wire Writes**: Single-buffer serialization for frame lengths and encrypted payloads prevents TCP packet fragmentation races.
 
+- **Multi-Layer Zero-Allocation Writes**: Reused `writeBuf` for all multi-layer framing in `libP2PConn.Write`, eliminating intermediate buffer allocations during 3-hop circuit data transmission.
+- **Strict Slow-Loris Rejection**: Hardened `readLineRaw` to immediately return an explicit error on lines exceeding `maxLineLen = 4096` bytes.
+- **Native macOS & Linux System Proxy**: Implemented native OS proxy configuration using `networksetup` (macOS) and `gsettings` (Linux GNOME) in addition to Windows Registry.
+- **Headless / Server Non-Interactive EULA**: Added `--accept-eula` CLI flag and `SHADOWLINK_ACCEPT_EULA=1` environment variable support for headless server and Docker deployments.
+
 ### 📱 GUI Telemetry & Mobile CI/CD
+- **Flutter GUI Status Matcher Fix**: Corrected SOCKS5 daemon stdout pattern matching in `DaemonService` (`daemon_service.dart`) to prevent false 30-second timeouts in entry-only mode.
+- **Desktop System Proxy Support**: Enabled `--sysproxy` automation across Windows, macOS, and Linux in the Flutter desktop GUI.
 - **Bounded Desktop Log Buffer**: Implemented a sliding window buffer (capped at 20,000 characters) in Flutter's `DaemonService` (`logNotifier`), preventing GUI memory growth during long-running sessions.
 - **`gomobile` Tooling Directive**: Integrated Go 1.24+ `tool` dependencies for streamlined `gomobile bind` workflows.
 - **NDK API 21+ Compatibility**: Modernized Android NDK compilation pipeline.

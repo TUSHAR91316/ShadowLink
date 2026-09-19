@@ -62,3 +62,19 @@ func TestReadLineRaw_EmptyLine(t *testing.T) {
 		t.Errorf("got %q, want empty string", line)
 	}
 }
+
+// TestReadLineRaw_ExceedsMaxLineLen verifies that lines exceeding maxLineLen return an error.
+func TestReadLineRaw_ExceedsMaxLineLen(t *testing.T) {
+	// Create an input stream of 4097 bytes without a newline
+	oversized := strings.Repeat("A", 4097)
+	r := strings.NewReader(oversized)
+
+	_, err := readLineRaw(r)
+	if err == nil {
+		t.Fatal("expected error when line exceeds maxLineLen, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum allowed") {
+		t.Errorf("expected max length error message, got: %v", err)
+	}
+}
+

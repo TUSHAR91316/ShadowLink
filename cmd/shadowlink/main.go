@@ -27,8 +27,9 @@ func main() {
 	isEntry := flag.Bool("entry", false, "Run as an entry node (client-side proxy)")
 	isRelay := flag.Bool("relay", false, "Run as a relay node (middleman hop)")
 	isExit := flag.Bool("exit", false, "Run as an exit node (internet egress)")
-	setProxy := flag.Bool("sysproxy", false, "Automatically configure the OS system proxy (Windows only)")
+	setProxy := flag.Bool("sysproxy", false, "Automatically configure the OS system proxy (Windows, macOS, Linux GNOME)")
 	resetProxy := flag.Bool("reset-proxy", false, "Reset the OS system proxy and exit immediately")
+	acceptEULA := flag.Bool("accept-eula", false, "Accept the EULA non-interactively (for headless servers and containers)")
 	flag.Parse()
 
 	// Handle --reset-proxy before anything else so it exits cleanly.
@@ -45,7 +46,7 @@ func main() {
 		*isEntry = true
 	}
 
-	checkEULA()
+	checkEULA(*acceptEULA)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -131,10 +132,18 @@ func main() {
 
 // checkEULA prompts the user to accept the Terms & Conditions on first run.
 // A sentinel file (config.EULAFileName) is written to disk on acceptance.
-// If the file already exists the function returns immediately.
-func checkEULA() {
+// If the file already exists or autoAccept/env var is provided, the function returns immediately.
+func checkEULA(autoAccept bool) {
 	if _, err := os.Stat(config.EULAFileName); err == nil {
 		return // Already accepted
+	}
+
+	if autoAccept || os.Getenv(config.EULAEnvVar) == "1" || strings.ToLower(os.Getenv(config.EULAEnvVar)) == "true" {
+		if err := os.WriteFile(config.EULAFileName, []byte("accepted\n"), 0o600); err != nil {
+			log.Printf("Warning: could not write EULA acceptance file: %v", err)
+		}
+		log.Println("Terms & Conditions accepted non-interactively.")
+		return
 	}
 
 	fmt.Println("================================================================================")

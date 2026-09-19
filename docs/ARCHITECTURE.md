@@ -146,8 +146,12 @@ System-wide proxy automation:
 |---|---|---|
 | `EnableSOCKS5(host, port)` | Windows | Sets `ProxyEnable=1` and `ProxyServer="SOCKS=host:port"` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`. |
 | `Disable()` | Windows | Sets `ProxyEnable=0` to restore standard direct networking. |
-| `EnableSOCKS5(host, port)` | POSIX | Logs instructions for manual network proxy setup. |
-| `Disable()` | POSIX | No-op safe stub returning nil. |
+| `EnableSOCKS5(host, port)` | macOS | Configures active network services via `networksetup -setsocksfirewallproxy` and `-setsocksfirewallproxystate on`. |
+| `Disable()` | macOS | Restores network service proxy state via `networksetup -setsocksfirewallproxystate off`. |
+| `EnableSOCKS5(host, port)` | Linux | Configures GNOME desktop proxy mode to `manual` and sets SOCKS host/port via `gsettings`. |
+| `Disable()` | Linux | Sets GNOME desktop proxy mode back to `none` via `gsettings`. |
+| `EnableSOCKS5(host, port)` | Other POSIX | Logs instructions for manual proxy setup. |
+| `Disable()` | Other POSIX | No-op safe stub returning nil. |
 
 ---
 
@@ -209,9 +213,10 @@ All post-handshake frames on the wire obey the following binary layout:
 |---|---|---|
 | `ecdh_test.go` | `internal/crypto` | Ephemeral key generation, shared secret parity, HKDF derivation length, forward secrecy across multiple handshakes. |
 | `encryption_test.go` | `internal/crypto` | XChaCha20-Poly1305 round-trips, in-place AEAD decryption, wrong key rejection, ciphertext tampering detection. |
+| `dht_test.go` | `internal/discovery` | Peer cache TTL freshness/expiration, InvalidatePeer selective eviction, and thread-safe concurrent read/invalidation. |
 | `onion_test.go` | `internal/onion` | 1-hop wrap/unwrap, 3-hop layered encapsulation, in-place unwrap, empty payload handling, empty keys error guard. |
-| `framing_test.go` | `internal/network` | Stream framing round-trips, atomic writes, multiple back-to-back frames, large 32KiB payloads, wrong key AEAD rejection. |
-| `handler_test.go` | `internal/network` | Byte-by-byte `readLineRaw` bounds, stop at newline without consuming key bytes, CRLF trimming, empty lines. |
+| `framing_test.go` | `internal/network` | Stream framing round-trips, 3-hop nested onion framing (Entry-Relay-Exit), atomic writes, large 32KiB payloads, wrong key AEAD rejection. |
+| `handler_test.go` | `internal/network` | Byte-by-byte `readLineRaw` bounds, stop at newline without consuming key bytes, CRLF trimming, empty lines, maxLineLen slow-loris rejection. |
 | `server_test.go` | `internal/socks5` | Nil dialer fallback, custom circuit dialer, context cancellation clean shutdown, port collision handling. |
 
 To execute the test suite with race detection:

@@ -129,8 +129,10 @@ class DaemonService {
       if (isRelay) args.add('--relay');
       if (isExit) args.add('--exit');
 
-      // Auto-configure system proxy on Windows for entry nodes.
-      if (isEntry && Platform.isWindows) args.add('--sysproxy');
+      // Auto-configure system proxy on desktop platforms for entry nodes.
+      if (isEntry && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+        args.add('--sysproxy');
+      }
 
       final binPath = _getBinaryPath();
 
@@ -147,8 +149,10 @@ class DaemonService {
         final line = String.fromCharCodes(data);
         _appendLog(line);
         // Detect connection success from daemon stdout.
-        if (line.contains('Starting local SOCKS5 proxy') ||
-            line.contains('Announce')) {
+        if (line.contains('Starting SOCKS5 proxy') ||
+            line.contains('SOCKS5 proxy listening') ||
+            line.contains('Announce') ||
+            line.contains('Announcing')) {
           _connectionTimeout?.cancel();
           statusNotifier.value = DaemonStatus.connected;
         }
@@ -191,9 +195,9 @@ class DaemonService {
     _process = null;
     statusNotifier.value = DaemonStatus.disconnected;
 
-    // Failsafe: On Windows, Process.kill() is a hard SIGKILL and skips Go defers.
+    // Failsafe: Process.kill() is a hard SIGKILL and skips Go defers.
     // Explicitly invoke the --reset-proxy flag to restore internet connectivity.
-    if (Platform.isWindows && isEntry) {
+    if ((Platform.isWindows || Platform.isMacOS || Platform.isLinux) && isEntry) {
       try {
         await Process.run(_getBinaryPath(), ['--reset-proxy']);
         logNotifier.value += '\nSystem proxy restored successfully.';

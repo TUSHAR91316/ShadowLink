@@ -52,6 +52,9 @@ const DefaultConnectionTimeout = 30 * time.Second
 // EULAFileName is the sentinel file written to disk when the user accepts the EULA.
 const EULAFileName = ".shadowlink_accepted"
 
+// EULAEnvVar is the environment variable that can be set to "1" or "true" to accept the EULA non-interactively.
+const EULAEnvVar = "SHADOWLINK_ACCEPT_EULA"
+
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 
 // DefaultBootstrapPeers are the well-known libp2p bootstrap nodes used to seed the DHT.

@@ -100,7 +100,7 @@ sequenceDiagram
 | **Entry Node** | `--entry` | Runs local SOCKS5 proxy (`127.0.0.1:1080`); wraps data with `[ExitKey, RelayKey]`. | Knows User IP and Relay IP. Does not expose target to Relay. |
 | **Relay Node** | `--relay` | Accepts `EXTEND` requests; bridges traffic to the designated Exit node. | Knows Entry IP and Exit IP. **Cannot read traffic payload or target destination.** |
 | **Exit Node** | `--exit` | Accepts `CONNECT` requests; dials target host on the public internet. | Knows Target Host and Relay IP. **Does not know User IP.** |
-| **System Proxy** | `--sysproxy` | Directs OS-wide TCP traffic to local SOCKS5 proxy via Windows Registry. | Client OS automation only. |
+| **System Proxy** | `--sysproxy` | Directs OS-wide TCP traffic to local SOCKS5 proxy (Windows Registry, macOS networksetup, Linux gsettings). | Client OS automation only. |
 
 ---
 
@@ -204,7 +204,9 @@ internal/
   socks5/server.go                # RFC 1928 SOCKS5 proxy server with custom onion dialer
   sysproxy/
     sysproxy_windows.go           # Windows registry system proxy automation (HKCU)
-    sysproxy_other.go             # Non-Windows fallback stub
+    sysproxy_darwin.go            # macOS networksetup system proxy automation
+    sysproxy_linux.go             # Linux GNOME gsettings system proxy automation
+    sysproxy_other.go             # Fallback stub for unsupported POSIX targets
 mobile/shadowlink.go              # gomobile exported MobileNode interface for iOS and Android
 shadowlink_gui/lib/               # Flutter cross-platform UI with cyber aesthetic
 ```

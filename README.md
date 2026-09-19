@@ -160,8 +160,9 @@ flutter run -d linux      # On Linux
 | `--exit` | `bool` | `false` | Run as an Exit node (egresses traffic to the internet) |
 | `--port` | `int` | `9000` | Port for incoming P2P libp2p connections (`0` = OS-assigned) |
 | `--socks` | `int` | `1080` | Port for local SOCKS5 proxy listener |
-| `--sysproxy` | `bool` | `false` | Automatically configure OS system proxy (Windows) |
+| `--sysproxy` | `bool` | `false` | Automatically configure OS system proxy (Windows, macOS, Linux GNOME) |
 | `--reset-proxy` | `bool` | `false` | Reset OS system proxy settings and exit immediately |
+| `--accept-eula` | `bool` | `false` | Accept EULA non-interactively (for headless servers and containers) |
 
 ---
 

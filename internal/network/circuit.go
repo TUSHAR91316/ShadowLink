@@ -376,18 +376,19 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 	// Write 4-byte big-endian length prefix directly before ciphertext.
 	binary.BigEndian.PutUint32(c.lenBuf[:], uint32(len(ciphertext)))
 
-	if len(ciphertext) > 0 && len(c.writeBuf) >= 4+len(ciphertext) && &ciphertext[0] == &c.writeBuf[4] {
-		copy(c.writeBuf[:4], c.lenBuf[:])
-		if _, err := c.Conn.Write(c.writeBuf[:4+len(ciphertext)]); err != nil {
-			return 0, err
-		}
-	} else {
-		out := make([]byte, 4+len(ciphertext))
-		copy(out[:4], c.lenBuf[:])
-		copy(out[4:], ciphertext)
-		if _, err := c.Conn.Write(out); err != nil {
-			return 0, err
-		}
+	totalLen := 4 + len(ciphertext)
+	if cap(c.writeBuf) < totalLen {
+		c.writeBuf = make([]byte, totalLen)
+	}
+	c.writeBuf = c.writeBuf[:totalLen]
+
+	copy(c.writeBuf[:4], c.lenBuf[:])
+	if len(ciphertext) > 0 && &ciphertext[0] != &c.writeBuf[4] {
+		copy(c.writeBuf[4:], ciphertext)
+	}
+
+	if _, err := c.Conn.Write(c.writeBuf); err != nil {
+		return 0, err
 	}
 
 	return len(b), nil

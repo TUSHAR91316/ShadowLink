@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .venv/
 .env
+legacy_python/build/
 
 # Node
 node_modules/
@@ -33,8 +34,8 @@ runs.json
 job_log_android.txt
 
 # Go Binaries
-shadowlink
-shadowlink.exe
+/shadowlink
+/shadowlink.exe
 
 # Flutter build output
 shadowlink_gui/build/

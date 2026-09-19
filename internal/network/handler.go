@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -227,7 +228,10 @@ func readLineRaw(r io.Reader) (string, error) {
 	var line []byte
 	var buf [1]byte
 
-	for len(line) <= maxLineLen {
+	for {
+		if len(line) >= maxLineLen {
+			return "", fmt.Errorf("line length exceeds maximum allowed (%d bytes)", maxLineLen)
+		}
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return strings.TrimSpace(string(line)), err
 		}

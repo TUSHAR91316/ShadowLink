@@ -176,6 +176,71 @@ func TestFraming_LargePayload(t *testing.T) {
 	}
 }
 
+// TestFraming_NestedLayers simulates a full 3-hop circuit:
+// Entry wraps with ExitKey then RelayKey -> Relay peels RelayKey -> Exit peels ExitKey.
+func TestFraming_NestedLayers(t *testing.T) {
+	// Pair 1: Entry <-> Relay
+	entryStream, relayStreamIn := newStreamPair(t)
+	// Pair 2: Relay <-> Exit
+	relayStreamOut, exitStream := newStreamPair(t)
+
+	relayKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey relay: %v", err)
+	}
+	exitKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey exit: %v", err)
+	}
+
+	// 1. Entry side: nested conn (relayKey inner, exitKey outer)
+	entryRelayConn := newLibP2PConn(streamAdapter{entryStream}, [][]byte{relayKey})
+	entryExitConn := newLibP2PConn(entryRelayConn, [][]byte{exitKey})
+
+	// 2. Relay side: peels relayKey and bridges to relayStreamOut
+	relayInConn := newLibP2PConn(streamAdapter{relayStreamIn}, [][]byte{relayKey})
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := relayInConn.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := relayStreamOut.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	// 3. Exit side: peels exitKey
+	exitConn := newLibP2PConn(streamAdapter{exitStream}, [][]byte{exitKey})
+
+	message := []byte("hello from 3-hop onion circuit!")
+	done := make(chan struct{})
+	var received []byte
+	var readErr error
+
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		n, err := exitConn.Read(buf)
+		received = buf[:n]
+		readErr = err
+	}()
+
+	if _, err := entryExitConn.Write(message); err != nil {
+		t.Fatalf("Write through nested onion conn: %v", err)
+	}
+
+	<-done
+	if readErr != nil {
+		t.Fatalf("Read on exit node: %v", readErr)
+	}
+	if !bytes.Equal(received, message) {
+		t.Errorf("got %q, want %q", received, message)
+	}
+}
+
 // BenchmarkFraming_Throughput_4KB measures the framing read/write throughput per operation.
 func BenchmarkFraming_Throughput_4KB(b *testing.B) {
 	writer, reader := makeLibP2PConnPair(b)
@@ -191,3 +256,4 @@ func BenchmarkFraming_Throughput_4KB(b *testing.B) {
 		_, _ = io.ReadFull(reader, readBuf)
 	}
 }
+
