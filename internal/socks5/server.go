@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 
 	socks5lib "github.com/armon/go-socks5"
 )
@@ -15,6 +16,27 @@ import (
 type Server struct {
 	port int
 	srv  *socks5lib.Server
+	addr net.Addr
+	mu   sync.RWMutex
+}
+
+// Addr returns the network address the server is listening on, or nil if not yet active.
+func (s *Server) Addr() net.Addr {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.addr
+}
+
+// Port returns the actual TCP port the server is listening on, or the configured port if not yet active.
+func (s *Server) Port() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.addr != nil {
+		if tcpAddr, ok := s.addr.(*net.TCPAddr); ok {
+			return tcpAddr.Port
+		}
+	}
+	return s.port
 }
 
 // DialerFunc is the function signature used to create outbound connections.
@@ -52,7 +74,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return fmt.Errorf("socks5: listen on %s: %w", addr, err)
 	}
 
-	log.Printf("SOCKS5 proxy listening on %s", addr)
+	s.mu.Lock()
+	s.addr = listener.Addr()
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+		s.port = tcpAddr.Port
+	}
+	s.mu.Unlock()
+
+	log.Printf("SOCKS5 proxy listening on %s", listener.Addr().String())
 
 	// Watch for context cancellation in a dedicated goroutine and close the
 	// listener when signalled. stopCh ensures the goroutine exits when the

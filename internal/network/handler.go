@@ -111,9 +111,19 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 		return
 	}
 
-	exitAddrInfo, err := ds.DHT.FindPeer(ctx, exitID)
-	if err != nil {
-		log.Printf("Relay: DHT lookup for exit %s failed: %v", exitID, err)
+	var exitAddrInfo peer.AddrInfo
+	if pInfo := ds.Host.Peerstore().PeerInfo(exitID); len(pInfo.Addrs) > 0 {
+		exitAddrInfo = pInfo
+	} else if ds.DHT != nil {
+		var err error
+		exitAddrInfo, err = ds.DHT.FindPeer(ctx, exitID)
+		if err != nil {
+			log.Printf("Relay: DHT lookup for exit %s failed: %v", exitID, err)
+			s.Reset() //nolint:errcheck
+			return
+		}
+	} else {
+		log.Printf("Relay: no peerstore addresses and DHT unavailable for exit %s", exitID)
 		s.Reset() //nolint:errcheck
 		return
 	}

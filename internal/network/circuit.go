@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,20 @@ import (
 	"github.com/shadowlink/core/internal/discovery"
 	"github.com/shadowlink/core/internal/onion"
 )
+
+type relayConnectError struct {
+	err error
+}
+
+func (e *relayConnectError) Error() string { return e.err.Error() }
+func (e *relayConnectError) Unwrap() error { return e.err }
+
+type exitConnectError struct {
+	err error
+}
+
+func (e *exitConnectError) Error() string { return e.err.Error() }
+func (e *exitConnectError) Unwrap() error { return e.err }
 
 // handshakeTimeout bounds circuit negotiation so unresponsive peers fail fast.
 const handshakeTimeout = 15 * time.Second
@@ -85,6 +100,7 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, relay := range relays {
+		relayDead := false
 		for _, exit := range exits {
 			if relay.ID == exit.ID {
 				continue // Never use the same node as both relay and exit
@@ -93,12 +109,29 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 			if err != nil {
 				log.Printf("Relay %s -> Exit %s failed: %v", relay.ID, exit.ID, err)
 				lastErr = err
-				// Evict dead nodes from peer cache to prevent repeated failed retries
-				ds.InvalidatePeer(config.RendezvousRelay, relay.ID)
+
+				var rErr *relayConnectError
+				var eErr *exitConnectError
+				if errors.As(err, &rErr) {
+					// The relay node itself is unresponsive; invalidate it and break the inner loop
+					// so we don't waste time trying all other exit nodes with this dead relay.
+					ds.InvalidatePeer(config.RendezvousRelay, relay.ID)
+					relayDead = true
+					break
+				} else if errors.As(err, &eErr) {
+					// The exit node failed; invalidate the exit and try the next exit with this relay.
+					ds.InvalidatePeer(config.RendezvousExit, exit.ID)
+				} else {
+					// Fallback invalidation
+					ds.InvalidatePeer(config.RendezvousRelay, relay.ID)
+				}
 				continue
 			}
 			log.Printf("3-hop circuit established: Entry -> %s -> %s -> Target", relay.ID, exit.ID)
 			return conn, nil
+		}
+		if relayDead {
+			continue
 		}
 	}
 	return nil, fmt.Errorf("all relay/exit combinations failed: %w", lastErr)
@@ -115,11 +148,11 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 //  6. Return a nested libP2PConn: inner is relayConn (relayKey), outer adds exitKey.
 func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exit peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, relay); err != nil {
-		return nil, fmt.Errorf("connect to relay: %w", err)
+		return nil, &relayConnectError{err: fmt.Errorf("connect to relay: %w", err)}
 	}
 	stream, err := ds.Host.NewStream(ctx, relay.ID, config.ProtocolID)
 	if err != nil {
-		return nil, fmt.Errorf("open stream to relay: %w", err)
+		return nil, &relayConnectError{err: fmt.Errorf("open stream to relay: %w", err)}
 	}
 
 	// Set deadline during circuit handshake so unresponsive peers fail fast.
@@ -135,13 +168,13 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 
 	// Step 1: Tell the relay which exit peer to extend to.
 	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.ExtendHeader, exit.ID.String()); err != nil {
-		return nil, fmt.Errorf("write EXTEND header: %w", err)
+		return nil, &relayConnectError{err: fmt.Errorf("write EXTEND header: %w", err)}
 	}
 
 	// Step 2: ECDH with the relay.
 	relayKey, err := crypto.PerformECDH(stream)
 	if err != nil {
-		return nil, fmt.Errorf("ECDH with relay: %w", err)
+		return nil, &relayConnectError{err: fmt.Errorf("ECDH with relay: %w", err)}
 	}
 
 	// relayConn: all traffic is encrypted with relayKey before hitting the wire.
@@ -149,13 +182,13 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 
 	// Step 3: Send the CONNECT command encrypted through the relay tunnel.
 	if _, err := fmt.Fprintf(relayConn, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
-		return nil, fmt.Errorf("write CONNECT header: %w", err)
+		return nil, &exitConnectError{err: fmt.Errorf("write CONNECT header: %w", err)}
 	}
 
 	// Step 4: ECDH with the exit, proxied transparently through the relay.
 	exitKey, err := crypto.PerformECDH(relayConn)
 	if err != nil {
-		return nil, fmt.Errorf("ECDH with exit: %w", err)
+		return nil, &exitConnectError{err: fmt.Errorf("ECDH with exit: %w", err)}
 	}
 
 	// Clear handshake deadline for normal streaming transfer.
@@ -236,18 +269,21 @@ func (s streamAdapter) RemoteAddr() net.Addr { return &net.TCPAddr{} }
 // libP2PConn wraps any net.Conn to provide layered onion encryption and
 // 4-byte big-endian length-prefix framing.
 //
-// Key optimizations:
+// Key optimizations & thread-safety:
 //   - Pre-instantiated cipher.AEAD instances eliminate allocations per packet.
+//   - Separate readMu and writeMu enable full-duplex I/O without lock contention.
 //   - Reused frameBuf and writeBuf enable zero-allocation read and write pipelines.
+//   - Stack-allocated lenBuf eliminates shared struct state and concurrent clobbering.
 type libP2PConn struct {
 	net.Conn
 	Keys     [][]byte
 	ciphers  []cipher.AEAD
 	onceInit sync.Once
+	readMu   sync.Mutex
 	readBuf  []byte
-	frameBuf []byte  // reused across reads to eliminate per-frame heap allocations
-	writeBuf []byte  // reused across writes to eliminate per-frame heap allocations
-	lenBuf   [4]byte // stack-allocated; avoids heap escape for the 4-byte length header
+	frameBuf []byte // reused across reads to eliminate per-frame heap allocations
+	writeMu  sync.Mutex
+	writeBuf []byte // reused across writes to eliminate per-frame heap allocations
 }
 
 // newLibP2PConn constructs a libP2PConn with pre-instantiated ciphers.
@@ -280,6 +316,9 @@ func (c *libP2PConn) initCiphers() {
 func (c *libP2PConn) Read(b []byte) (int, error) {
 	c.initCiphers()
 
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+
 	// Drain any leftover plaintext from a prior partial read.
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
@@ -290,15 +329,16 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 		return n, nil
 	}
 
-	// Read the 4-byte big-endian frame length.
-	if _, err := io.ReadFull(c.Conn, c.lenBuf[:]); err != nil {
+	// Read the 4-byte big-endian frame length using a stack-allocated buffer.
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
 		return 0, err
 	}
-	frameLen := binary.BigEndian.Uint32(c.lenBuf[:])
+	frameLen := binary.BigEndian.Uint32(lenBuf[:])
 
-	// Enforce max frame size to prevent OOM-DoS attacks.
-	if frameLen > config.MaxFrameSize {
-		return 0, fmt.Errorf("frame length %d exceeds maximum %d: possible protocol violation", frameLen, config.MaxFrameSize)
+	// Enforce frame size bounds (minimum 40 bytes: 24-byte nonce + 16-byte Poly1305 AEAD tag).
+	if frameLen < 40 || frameLen > config.MaxFrameSize {
+		return 0, fmt.Errorf("invalid frame length %d (must be between 40 and %d): possible protocol violation", frameLen, config.MaxFrameSize)
 	}
 
 	// Grow the reusable frameBuf only when the incoming frame is larger than any seen so far.
@@ -349,6 +389,9 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 func (c *libP2PConn) Write(b []byte) (int, error) {
 	c.initCiphers()
 
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	// Calculate needed buffer size for all cipher layers: 4 + len(b) + layers*(24+16)
 	overheadPerLayer := 40 // 24 nonce + 16 poly1305 tag
 	numLayers := len(c.Keys)
@@ -373,16 +416,15 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 		return 0, fmt.Errorf("encryption failed: %w", err)
 	}
 
-	// Write 4-byte big-endian length prefix directly before ciphertext.
-	binary.BigEndian.PutUint32(c.lenBuf[:], uint32(len(ciphertext)))
-
 	totalLen := 4 + len(ciphertext)
 	if cap(c.writeBuf) < totalLen {
 		c.writeBuf = make([]byte, totalLen)
 	}
 	c.writeBuf = c.writeBuf[:totalLen]
 
-	copy(c.writeBuf[:4], c.lenBuf[:])
+	// Write 4-byte big-endian length prefix directly into writeBuf header.
+	binary.BigEndian.PutUint32(c.writeBuf[:4], uint32(len(ciphertext)))
+
 	if len(ciphertext) > 0 && &ciphertext[0] != &c.writeBuf[4] {
 		copy(c.writeBuf[4:], ciphertext)
 	}

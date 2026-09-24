@@ -127,9 +127,10 @@ graph LR
 1. **Bootstrap Phase**: The node dials multiaddresses of well-known decentralized seed peers (`DefaultBootstrapPeers`) under a 10-second timeout context.
 2. **Auto-Mode Routing**: The discovery service activates `dht.ModeAuto`, allowing the node to dynamically determine whether to run as a full DHT routing table server or client based on public NAT reachability.
 3. **Advertisement Phase**: Relays and Exits advertise their respective roles to the Kad-DHT routing table.
-4. **Sub-Millisecond Peer Caching**: Discovered peers are stored in an in-memory `peerCache` protected by a `sync.RWMutex` with a 45-second Time-To-Live (TTL). Subsequent connection requests (such as parallel browser asset requests) resolve cached peers in **<1ms** instead of triggering repetitive 1–2 second Kad-DHT traversals.
-5. **Instant Failure Eviction**: When a circuit dial attempt to a relay or exit fails, `ds.InvalidatePeer(peerID)` is called immediately to purge the unreachable node from the cache without waiting for TTL expiration.
+4. **Sub-Millisecond Peer Caching & Peerstore Fast-Path**: Discovered peers are stored in an in-memory `peerCache` protected by a `sync.RWMutex` with a 45-second Time-To-Live (TTL). When extending circuits (`handleRelay`), known peer addresses are resolved directly via `ds.Host.Peerstore()` in **<1ms** before falling back to network DHT traversals.
+5. **Granular Failure Attribution**: When negotiating 3-hop circuits, errors are partitioned into `relayConnectError` (relay node offline; evicts relay and immediately breaks inner loop to advance to next relay) and `exitConnectError` (exit node offline; evicts exit and tries alternative exits with the same relay).
 6. **Cryptographically Secure Shuffling**: Candidate peer lists are randomized via `cryptoShuffle()` using `crypto/rand.Int`. This eliminates pseudo-random number generator (PRNG) state observation attacks, guaranteeing uniform non-deterministic circuit path selection.
+7. **Ephemeral Key Memory Zeroing**: Intermediate raw X25519 shared secrets (`rawSecret`) are wiped immediately via defer after HKDF derivation, preventing key material persistence in process heap.
 
 ---
 
@@ -157,7 +158,8 @@ All frames transmitted through `libP2PConn` follow a strict binary layout:
 ```
 [4 Bytes Big-Endian Length Prefix][24-Byte Nonce][Ciphertext Payload][16-Byte Poly1305 Tag]
 ```
-- **Max Frame Cap**: Individual frames are capped at `MaxFrameSize` (128 KiB) to prevent Out-Of-Memory (OOM) DoS attacks.
+- **Frame Length Bounds**: Frames are checked against `40 <= frameLen <= MaxFrameSize` (128 KiB). Frames below 40 bytes (minimum 24-byte nonce + 16-byte Poly1305 AEAD tag) or exceeding max size are rejected before buffer allocation to prevent memory underflow and DoS exploits.
+- **Thread-Safe Full-Duplex I/O**: `libP2PConn` utilizes decoupled `readMu` and `writeMu` mutexes and stack-allocated frame length buffers. Readers and writers operate fully concurrently in parallel streams without lock contention or frame header clobbering.
 - **Zero-Allocation In-Place Decryption**: During frame reads, `DecryptWithAEADInPlace` and `UnwrapPayloadInPlace` peel cryptographic layers directly inside the pre-allocated slice buffer, eliminating heap allocations and achieving **>1.15 GB/s** decryption throughput per CPU core.
 - **Contiguous Wrap Allocations**: Outbound layered onion wrapping pre-allocates an exact single-buffer envelope per layer (`WrapPayloadWithCiphers`), preventing slice aliasing and memory corruption between concentric layers.
 - **Pooled Stream Bridging**: The bi-directional forwarding engine in `bridge()` uses a `sync.Pool` of 32 KiB byte slices (`copyBufferPool`) with `io.CopyBuffer`, eliminating runtime GC churn during high-bandwidth proxying.

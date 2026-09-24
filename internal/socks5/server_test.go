@@ -86,3 +86,40 @@ func TestListenAndServe_PortInUse(t *testing.T) {
 		t.Error("ListenAndServe must fail when the port is already in use")
 	}
 }
+
+// TestServer_AddrAndPortInspection verifies that Addr() and Port() correctly reflect
+// the dynamically allocated ephemeral port when port 0 is configured.
+func TestServer_AddrAndPortInspection(t *testing.T) {
+	srv, err := NewServer(0, nil)
+	if err != nil {
+		t.Fatalf("NewServer(0): %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe(ctx)
+	}()
+
+	// Wait until server has bound to port
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if srv.Port() > 0 && srv.Addr() != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if srv.Port() <= 0 {
+		t.Errorf("expected dynamically bound port > 0, got %d", srv.Port())
+	}
+	if srv.Addr() == nil {
+		t.Error("expected non-nil Addr()")
+	}
+
+	cancel()
+	<-errCh
+}
+

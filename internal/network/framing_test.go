@@ -2,8 +2,10 @@ package network
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,4 +258,96 @@ func BenchmarkFraming_Throughput_4KB(b *testing.B) {
 		_, _ = io.ReadFull(reader, readBuf)
 	}
 }
+
+// TestFraming_ConcurrentFullDuplex verifies that two endpoints can read and write simultaneously
+// without data races or frame buffer corruption.
+func TestFraming_ConcurrentFullDuplex(t *testing.T) {
+	connA, connB := makeLibP2PConnPair(t)
+	const numMessages = 50
+	msgA := []byte("hello from endpoint A")
+	msgB := []byte("greetings from endpoint B")
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// Goroutine 1: write A -> B
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numMessages; i++ {
+			if _, err := connA.Write(msgA); err != nil {
+				t.Errorf("connA.Write: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Goroutine 2: read on B from A
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1024)
+		for i := 0; i < numMessages; i++ {
+			n, err := connB.Read(buf)
+			if err != nil {
+				t.Errorf("connB.Read: %v", err)
+				return
+			}
+			if !bytes.Equal(buf[:n], msgA) {
+				t.Errorf("connB got %q, want %q", buf[:n], msgA)
+				return
+			}
+		}
+	}()
+
+	// Goroutine 3: write B -> A
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numMessages; i++ {
+			if _, err := connB.Write(msgB); err != nil {
+				t.Errorf("connB.Write: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Goroutine 4: read on A from B
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1024)
+		for i := 0; i < numMessages; i++ {
+			n, err := connA.Read(buf)
+			if err != nil {
+				t.Errorf("connA.Read: %v", err)
+				return
+			}
+			if !bytes.Equal(buf[:n], msgB) {
+				t.Errorf("connA got %q, want %q", buf[:n], msgB)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestFraming_InvalidFrameLength verifies that malformed frame lengths (< 40 bytes or > MaxFrameSize)
+// are rejected before attempting unwrap or buffer allocation.
+func TestFraming_InvalidFrameLength(t *testing.T) {
+	s1, s2 := newStreamPair(t)
+	key, _ := crypto.GenerateKey()
+	conn := newLibP2PConn(streamAdapter{s2}, [][]byte{key})
+
+	// Inject a frame length header of 10 bytes (too small for 24-byte nonce + 16-byte Poly1305 tag)
+	var badLen [4]byte
+	binary.BigEndian.PutUint32(badLen[:], 10)
+	go func() {
+		_, _ = s1.Write(badLen[:])
+	}()
+
+	buf := make([]byte, 100)
+	_, err := conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected error on too-short frame length, got nil")
+	}
+}
+
 

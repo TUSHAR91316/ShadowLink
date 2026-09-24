@@ -137,6 +137,8 @@ Standard RFC 1928 SOCKS5 server for desktop/mobile local client entry:
 |---|---|
 | `NewServer(port, dialer)` | Creates SOCKS5 listener with custom circuit dialer function. |
 | `ListenAndServe(ctx)` | Serves connections until context cancellation; handles clean teardown without error leakage. |
+| `Server.Addr()` | Returns the bound listener `net.Addr` (thread-safe, protected by `sync.RWMutex`). |
+| `Server.Port()` | Returns the actual bound TCP port (dynamically allocated if initialized with port 0). |
 
 ---
 
@@ -161,6 +163,7 @@ Cross-platform bindings compiled via `gomobile`:
 |---|---|
 | `StartEntryNode(socksPort)` | Instantiates mobile discovery service (port 0, opportunistic DHT) and starts SOCKS5 server. |
 | `DefaultSOCKSPort()` | Returns standard SOCKS5 port (`1080`) as `int64` for Swift/Kotlin. |
+| `MobileNode.SOCKSPort()` | Returns actual bound SOCKS5 port as `int64` (especially useful when started with port 0). |
 | `MobileNode.Stop()` | Cancels context and closes libp2p host. |
 
 ---

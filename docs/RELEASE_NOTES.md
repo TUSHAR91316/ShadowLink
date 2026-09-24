@@ -2,10 +2,26 @@
 
 ---
 
+## 🚀 Release v2.0.4-alpha — Concurrency Hardening, Secret Zeroization & Granular Error Attribution
+
+**Release Date:** September 2026  
+**Status:** Alpha Release (Current)
+
+### 🔒 Concurrency & Cryptographic Defense-in-Depth
+- **Eliminated `libP2PConn` Data Race**: Removed the shared `lenBuf` struct member from `libP2PConn`. Replaced with stack-allocated buffers in `Read()` and direct write buffer offsets in `Write()`. Introduced independent `readMu` and `writeMu` mutexes to enable full-duplex parallel bidirectional streaming without lock contention or frame corruption.
+- **Frame Length Lower-Bound Validation**: Hardened `Read()` to reject any frame length below 40 bytes (`frameLen < 40`), preventing slice underflows and malformed packet processing before buffer allocation.
+- **Cryptographic Memory Zeroization**: Derivation of the raw X25519 shared secret (`rawSecret`) in `crypto.doECDH` now explicitly scrubs memory via `defer`, wiping ephemeral key material from heap to protect against memory scraping and core dump inspection.
+- **Granular Circuit Error Attribution**: Refactored `dialViaRelay` with custom `relayConnectError` and `exitConnectError` types. If a relay is offline, it is evicted immediately and the inner exit loop is broken early to prevent multi-timeout stalling. If an exit is offline, only the exit node is evicted, allowing the current relay to attempt remaining healthy exits.
+- **Peerstore Fast-Path Lookup**: Optimized `handleRelay` to inspect `ds.Host.Peerstore().PeerInfo(exitID)` before initiating a network DHT traversal, achieving <1ms resolution when exit multiaddresses are already known.
+- **Dynamic SOCKS5 Port Inspection**: Added thread-safe `Addr()` and `Port()` methods to `socks5.Server` and exposed `MobileNode.SOCKSPort()` via gomobile, enabling accurate ephemeral port reporting when binding to port 0.
+- **Automated GUI EULA Passthrough**: Injected `--accept-eula` directly into desktop daemon spawn arguments in Flutter's `DaemonService`, ensuring background daemon startup never hangs on interactive stdin in headless or permission-restricted environments.
+
+---
+
 ## 🚀 Release v2.0.3-alpha — Hardened Onion Routing, Peer Caching & Zero-Allocation Engine
 
 **Release Date:** September 2026  
-**Status:** Alpha Release (Recommended)
+**Status:** Alpha Release (Archived)
 
 ### 🔒 Security & Onion Routing Hardening
 - **Cryptographically Secure Shuffling**: Replaced `math/rand` with `crypto/rand.Int` in `cryptoShuffle()`. Candidate peer selection for circuits is now protected against PRNG state observation and route prediction attacks.

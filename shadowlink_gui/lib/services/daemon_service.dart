@@ -134,6 +134,9 @@ class DaemonService {
         args.add('--sysproxy');
       }
 
+      // Explicitly pass --accept-eula so headless/daemon execution never hangs on stdin.
+      args.add('--accept-eula');
+
       final binPath = _getBinaryPath();
 
       // Write the EULA acceptance file so the CLI daemon does not hang on stdin.

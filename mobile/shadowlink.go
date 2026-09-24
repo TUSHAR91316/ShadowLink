@@ -16,6 +16,7 @@ import (
 type MobileNode struct {
 	ds     *discovery.DiscoveryService
 	cancel context.CancelFunc
+	proxy  *socks5.Server
 }
 
 // StartEntryNode starts a ShadowLink entry node and a local SOCKS5 proxy on
@@ -60,13 +61,22 @@ func StartEntryNode(socksPort int64) (*MobileNode, error) {
 		}
 	}()
 
-	return &MobileNode{ds: ds, cancel: cancel}, nil
+	return &MobileNode{ds: ds, cancel: cancel, proxy: proxy}, nil
 }
 
 // DefaultSOCKSPort returns the standard SOCKS5 proxy port for this build.
 // Exposed via gomobile so host apps can read it without hardcoding the value.
 func DefaultSOCKSPort() int64 {
 	return int64(config.DefaultSOCKSPort)
+}
+
+// SOCKSPort returns the actual port the local SOCKS5 proxy is listening on.
+// Especially useful when StartEntryNode was called with socksPort=0.
+func (m *MobileNode) SOCKSPort() int64 {
+	if m.proxy != nil {
+		return int64(m.proxy.Port())
+	}
+	return 0
 }
 
 // Stop cleanly shuts down the ShadowLink entry node:
