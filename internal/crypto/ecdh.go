@@ -76,6 +76,12 @@ func doECDH(rw io.ReadWriter, initiator bool) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ecdh: key agreement failed: %w", err)
 	}
+	defer func() {
+		// Zeroize rawSecret memory buffer to prevent sensitive key material from lingering in heap.
+		for i := range rawSecret {
+			rawSecret[i] = 0
+		}
+	}()
 
 	// Derive the final encryption key using HKDF-SHA256.
 	// config.HKDFInfo provides domain separation; changing it is a breaking protocol change.
