@@ -235,7 +235,8 @@ func bridge(a, b net.Conn) {
 // adversary streams a very long line without a newline to exhaust memory.
 func readLineRaw(r io.Reader) (string, error) {
 	const maxLineLen = 4096
-	var line []byte
+	var stackBuf [128]byte
+	line := stackBuf[:0]
 	var buf [1]byte
 
 	for {

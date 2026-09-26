@@ -2,7 +2,10 @@ package onion
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"testing"
+
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/shadowlink/core/internal/crypto"
 )
@@ -118,3 +121,95 @@ func TestWrapPayload_EmptyKeys(t *testing.T) {
 		t.Error("WrapPayload with empty keys must return an error")
 	}
 }
+
+// TestWrapPayloadWithBuffers_TwoLayers verifies ping-pong multi-layer wrapping
+// with pre-allocated destination and scratch buffers.
+func TestWrapPayloadWithBuffers_TwoLayers(t *testing.T) {
+	relayKey := mustGenerateKey(t)
+	exitKey := mustGenerateKey(t)
+
+	c1, err := chacha20poly1305.NewX(relayKey)
+	if err != nil {
+		t.Fatalf("NewX relay: %v", err)
+	}
+	c2, err := chacha20poly1305.NewX(exitKey)
+	if err != nil {
+		t.Fatalf("NewX exit: %v", err)
+	}
+	ciphers := []cipher.AEAD{c1, c2}
+
+	payload := []byte("ping pong buffer test message")
+	// Needed for 2 layers: len(payload) + 80
+	dst := make([]byte, 0, len(payload)+80)
+	scratch := make([]byte, 0, len(payload)+40)
+
+	wrapped, err := WrapPayloadWithBuffers(payload, ciphers, dst, scratch)
+	if err != nil {
+		t.Fatalf("WrapPayloadWithBuffers: %v", err)
+	}
+
+	// Verify wrapped aliases dst backing array
+	if len(wrapped) != len(payload)+80 {
+		t.Fatalf("expected len %d, got %d", len(payload)+80, len(wrapped))
+	}
+	if &wrapped[0] != &dst[:cap(dst)][0] {
+		t.Errorf("expected wrapped to alias dst buffer")
+	}
+
+	// Peeling: first relayKey (outer layer 0), then exitKey (inner layer 1)
+	unwrappedRelay, err := UnwrapPayload(wrapped, relayKey)
+	if err != nil {
+		t.Fatalf("UnwrapPayload relay: %v", err)
+	}
+	unwrappedExit, err := UnwrapPayload(unwrappedRelay, exitKey)
+	if err != nil {
+		t.Fatalf("UnwrapPayload exit: %v", err)
+	}
+
+	if !bytes.Equal(unwrappedExit, payload) {
+		t.Fatalf("payload mismatch: got %q, want %q", unwrappedExit, payload)
+	}
+}
+
+// TestWrapPayloadWithBuffers_ThreeLayers verifies 3-layer ping-pong wrapping.
+func TestWrapPayloadWithBuffers_ThreeLayers(t *testing.T) {
+	k1 := mustGenerateKey(t)
+	k2 := mustGenerateKey(t)
+	k3 := mustGenerateKey(t)
+
+	ciphers := make([]cipher.AEAD, 3)
+	ciphers[0], _ = chacha20poly1305.NewX(k1)
+	ciphers[1], _ = chacha20poly1305.NewX(k2)
+	ciphers[2], _ = chacha20poly1305.NewX(k3)
+
+	payload := []byte("three layers ping pong")
+	dst := make([]byte, 0, len(payload)+120)
+	scratch := make([]byte, 0, len(payload)+80)
+
+	wrapped, err := WrapPayloadWithBuffers(payload, ciphers, dst, scratch)
+	if err != nil {
+		t.Fatalf("WrapPayloadWithBuffers: %v", err)
+	}
+
+	if &wrapped[0] != &dst[:cap(dst)][0] {
+		t.Errorf("expected wrapped to alias dst buffer")
+	}
+
+	p1, err := UnwrapPayload(wrapped, k1)
+	if err != nil {
+		t.Fatalf("layer 1: %v", err)
+	}
+	p2, err := UnwrapPayload(p1, k2)
+	if err != nil {
+		t.Fatalf("layer 2: %v", err)
+	}
+	p3, err := UnwrapPayload(p2, k3)
+	if err != nil {
+		t.Fatalf("layer 3: %v", err)
+	}
+
+	if !bytes.Equal(p3, payload) {
+		t.Fatalf("payload mismatch: got %q, want %q", p3, payload)
+	}
+}
+

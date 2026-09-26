@@ -243,20 +243,64 @@ func TestFraming_NestedLayers(t *testing.T) {
 	}
 }
 
-// BenchmarkFraming_Throughput_4KB measures the framing read/write throughput per operation.
+// BenchmarkFraming_Throughput_4KB measures single-layer framing read/write throughput per operation.
 func BenchmarkFraming_Throughput_4KB(b *testing.B) {
 	writer, reader := makeLibP2PConnPair(b)
 	payload := make([]byte, 4096)
 	readBuf := make([]byte, 4096)
 	b.SetBytes(int64(len(payload)))
-	b.ResetTimer()
 
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < b.N; i++ {
+			if _, err := writer.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		go func() {
-			_, _ = writer.Write(payload)
-		}()
-		_, _ = io.ReadFull(reader, readBuf)
+		if _, err := io.ReadFull(reader, readBuf); err != nil {
+			b.Fatalf("ReadFull: %v", err)
+		}
 	}
+	<-done
+}
+
+// BenchmarkFraming_MultiLayer_Throughput_3Hop measures 3-hop circuit (2 cipher layers) zero-allocation framing.
+func BenchmarkFraming_MultiLayer_Throughput_3Hop(b *testing.B) {
+	s1, s2 := newStreamPair(b)
+	k1, _ := crypto.GenerateKey()
+	k2, _ := crypto.GenerateKey()
+
+	writer := newLibP2PConn(streamAdapter{s1}, [][]byte{k1, k2})
+	reader := newLibP2PConn(streamAdapter{s2}, [][]byte{k1, k2})
+
+	payload := make([]byte, 4096)
+	readBuf := make([]byte, 4096)
+	b.SetBytes(int64(len(payload)))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < b.N; i++ {
+			if _, err := writer.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := io.ReadFull(reader, readBuf); err != nil {
+			b.Fatalf("ReadFull: %v", err)
+		}
+	}
+	<-done
 }
 
 // TestFraming_ConcurrentFullDuplex verifies that two endpoints can read and write simultaneously

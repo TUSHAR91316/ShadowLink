@@ -70,15 +70,28 @@ func cryptoShuffle[T any](slice []T) {
 func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetwork, targetAddr string) (net.Conn, error) {
 	log.Printf("DialCircuit: building circuit for %s", targetAddr)
 
-	exits, err := ds.FindPeers(ctx, config.RendezvousExit)
-	if err != nil || len(exits) == 0 {
-		return nil, fmt.Errorf("no exit nodes found in DHT: %w", err)
+	// Concurrently query exit and relay nodes to halve initial circuit discovery latency.
+	var exits, relays []peer.AddrInfo
+	var exitErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		exits, exitErr = ds.FindPeers(ctx, config.RendezvousExit)
+	}()
+	go func() {
+		defer wg.Done()
+		relays, _ = ds.FindPeers(ctx, config.RendezvousRelay)
+	}()
+	wg.Wait()
+
+	if exitErr != nil || len(exits) == 0 {
+		return nil, fmt.Errorf("no exit nodes found in DHT: %w", exitErr)
 	}
 	// Cryptographically shuffle exit list to randomise routing.
 	cryptoShuffle(exits)
 
 	// Prefer 3-hop routing through a relay node.
-	relays, _ := ds.FindPeers(ctx, config.RendezvousRelay)
 	if len(relays) > 0 {
 		cryptoShuffle(relays)
 		log.Printf("Found %d relay(s) and %d exit(s) — attempting 3-hop circuit", len(relays), len(exits))
@@ -272,18 +285,19 @@ func (s streamAdapter) RemoteAddr() net.Addr { return &net.TCPAddr{} }
 // Key optimizations & thread-safety:
 //   - Pre-instantiated cipher.AEAD instances eliminate allocations per packet.
 //   - Separate readMu and writeMu enable full-duplex I/O without lock contention.
-//   - Reused frameBuf and writeBuf enable zero-allocation read and write pipelines.
+//   - Reused frameBuf, writeBuf, and scratchBuf enable zero-allocation read and write pipelines.
 //   - Stack-allocated lenBuf eliminates shared struct state and concurrent clobbering.
 type libP2PConn struct {
 	net.Conn
-	Keys     [][]byte
-	ciphers  []cipher.AEAD
-	onceInit sync.Once
-	readMu   sync.Mutex
-	readBuf  []byte
-	frameBuf []byte // reused across reads to eliminate per-frame heap allocations
-	writeMu  sync.Mutex
-	writeBuf []byte // reused across writes to eliminate per-frame heap allocations
+	Keys       [][]byte
+	ciphers    []cipher.AEAD
+	onceInit   sync.Once
+	readMu     sync.Mutex
+	readBuf    []byte
+	frameBuf   []byte // reused across reads to eliminate per-frame heap allocations
+	writeMu    sync.Mutex
+	writeBuf   []byte // reused across writes to eliminate per-frame heap allocations
+	scratchBuf []byte // reused across multi-layer writes for zero-allocation ping-pong
 }
 
 // newLibP2PConn constructs a libP2PConn with pre-instantiated ciphers.
@@ -323,9 +337,6 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
 		c.readBuf = c.readBuf[n:]
-		if len(c.readBuf) == 0 {
-			c.readBuf = nil // release backing array reference
-		}
 		return n, nil
 	}
 
@@ -375,8 +386,13 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 
 	n := copy(b, plaintext)
 	if n < len(plaintext) {
-		// plaintext aliases frameBuf; copy the tail so subsequent reads don't overwrite it.
-		c.readBuf = make([]byte, len(plaintext)-n)
+		// plaintext aliases frameBuf; copy the tail into reusable readBuf without fresh heap allocations.
+		remaining := len(plaintext) - n
+		if cap(c.readBuf) < remaining {
+			c.readBuf = make([]byte, remaining)
+		} else {
+			c.readBuf = c.readBuf[:remaining]
+		}
 		copy(c.readBuf, plaintext[n:])
 	}
 	return n, nil
@@ -385,7 +401,7 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 // Write encrypts b with all session keys and sends it as a single framed message:
 // [4-byte BE length][ciphertext].
 //
-// Optimized with reusable writeBuf to eliminate heap allocations per write.
+// Optimized with reusable writeBuf and scratchBuf to eliminate heap allocations per write.
 func (c *libP2PConn) Write(b []byte) (int, error) {
 	c.initCiphers()
 
@@ -408,7 +424,15 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 	var err error
 
 	if len(c.ciphers) > 0 {
-		ciphertext, err = onion.WrapPayloadWithCiphers(b, c.ciphers, c.writeBuf[4:4])
+		if numLayers > 1 {
+			scratchNeeded := len(b) + (numLayers-1)*overheadPerLayer
+			if cap(c.scratchBuf) < scratchNeeded {
+				c.scratchBuf = make([]byte, scratchNeeded)
+			}
+			ciphertext, err = onion.WrapPayloadWithBuffers(b, c.ciphers, c.writeBuf[4:4], c.scratchBuf[:0])
+		} else {
+			ciphertext, err = onion.WrapPayloadWithBuffers(b, c.ciphers, c.writeBuf[4:4], nil)
+		}
 	} else {
 		ciphertext, err = onion.WrapPayload(b, c.Keys)
 	}

@@ -35,21 +35,36 @@ func WrapPayload(payload []byte, keys [][]byte) ([]byte, error) {
 // WrapPayloadWithCiphers wraps payload through pre-instantiated AEAD ciphers in reverse order.
 // When a single cipher is provided, dst is used directly with zero allocations.
 func WrapPayloadWithCiphers(payload []byte, ciphers []cipher.AEAD, dst []byte) ([]byte, error) {
+	return WrapPayloadWithBuffers(payload, ciphers, dst, nil)
+}
+
+// WrapPayloadWithBuffers wraps payload through pre-instantiated AEAD ciphers in reverse order,
+// ping-ponging between dst and scratch to eliminate heap allocations for multi-hop circuits.
+// The final outermost layer is guaranteed to reside in dst.
+func WrapPayloadWithBuffers(payload []byte, ciphers []cipher.AEAD, dst, scratch []byte) ([]byte, error) {
 	if len(ciphers) == 0 {
-		return nil, errors.New("onion: WrapPayloadWithCiphers requires at least one cipher")
+		return nil, errors.New("onion: WrapPayloadWithBuffers requires at least one cipher")
 	}
 
 	if len(ciphers) == 1 {
 		return crypto.EncryptWithAEAD(ciphers[0], payload, dst)
 	}
 
-	// For multi-layer wrapping, sequentially wrap to avoid buffer overlap corruption.
 	current := payload
 	var err error
 	for i := len(ciphers) - 1; i >= 0; i-- {
-		current, err = crypto.EncryptWithAEAD(ciphers[i], current, nil)
+		var targetBuf []byte
+		// Parity targeting: even indices (including outermost layer 0) write to dst;
+		// odd indices write to scratch. This guarantees the final layer always lands in dst.
+		if i%2 == 0 {
+			targetBuf = dst
+		} else {
+			targetBuf = scratch
+		}
+
+		current, err = crypto.EncryptWithAEAD(ciphers[i], current, targetBuf)
 		if err != nil {
-			return nil, fmt.Errorf("onion: WrapPayloadWithCiphers at layer %d: %w", i, err)
+			return nil, fmt.Errorf("onion: WrapPayloadWithBuffers at layer %d: %w", i, err)
 		}
 	}
 	return current, nil

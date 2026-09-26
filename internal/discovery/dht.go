@@ -14,6 +14,7 @@ import (
 	routing2 "github.com/libp2p/go-libp2p/core/routing"
 	"github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
+	"golang.org/x/sync/singleflight"
 )
 
 // peerCacheTTL is the duration for which discovered DHT peers are cached.
@@ -27,10 +28,11 @@ type peerCacheEntry struct {
 
 // DiscoveryService wraps a libp2p host and a Kademlia DHT for peer discovery.
 type DiscoveryService struct {
-	Host       host.Host
-	DHT        *dht.IpfsDHT
-	peerCache  map[string]peerCacheEntry
-	cacheMutex sync.RWMutex
+	Host         host.Host
+	DHT          *dht.IpfsDHT
+	peerCache    map[string]peerCacheEntry
+	cacheMutex   sync.RWMutex
+	requestGroup singleflight.Group
 }
 
 // NewDiscoveryService initialises a new libp2p host, bootstraps the Kad DHT,
@@ -123,6 +125,7 @@ func (d *DiscoveryService) Announce(ctx context.Context, rendezvous string) erro
 // FindPeers discovers other nodes announcing a specific rendezvous string.
 // Results are cached in-memory with a 45s TTL to prevent DHT query saturation
 // on bursty connection requests (e.g. web browser page loads).
+// Concurrent cache misses are coalesced into a single Kad-DHT lookup via singleflight.
 func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]peer.AddrInfo, error) {
 	// Check cache first
 	d.cacheMutex.RLock()
@@ -135,33 +138,59 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 	}
 	d.cacheMutex.RUnlock()
 
-	routingDiscovery := routing.NewRoutingDiscovery(d.DHT)
+	// Singleflight coalesces all concurrent cache misses for the same rendezvous key into a single DHT query.
+	val, err, _ := d.requestGroup.Do(rendezvous, func() (any, error) {
+		// Double-check cache inside singleflight in case a concurrent caller just populated it
+		d.cacheMutex.RLock()
+		if entry, found := d.peerCache[rendezvous]; found && time.Since(entry.timestamp) < peerCacheTTL && len(entry.peers) > 0 {
+			cached := make([]peer.AddrInfo, len(entry.peers))
+			copy(cached, entry.peers)
+			d.cacheMutex.RUnlock()
+			return cached, nil
+		}
+		d.cacheMutex.RUnlock()
 
-	peerChan, err := routingDiscovery.FindPeers(ctx, rendezvous)
+		routingDiscovery := routing.NewRoutingDiscovery(d.DHT)
+		peerChan, err := routingDiscovery.FindPeers(ctx, rendezvous)
+		if err != nil {
+			return nil, err
+		}
+
+		var peers []peer.AddrInfo
+		for p := range peerChan {
+			// Skip self and peers with no known addresses (they cannot be dialled).
+			if p.ID == d.Host.ID() || len(p.Addrs) == 0 {
+				continue
+			}
+			peers = append(peers, p)
+		}
+
+		// Update cache
+		d.cacheMutex.Lock()
+		d.peerCache[rendezvous] = peerCacheEntry{
+			peers:     peers,
+			timestamp: time.Now(),
+		}
+		d.cacheMutex.Unlock()
+
+		res := make([]peer.AddrInfo, len(peers))
+		copy(res, peers)
+		return res, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	var peers []peer.AddrInfo
-	for p := range peerChan {
-		// Skip self and peers with no known addresses (they cannot be dialled).
-		if p.ID == d.Host.ID() || len(p.Addrs) == 0 {
-			continue
-		}
-		peers = append(peers, p)
+	peers, ok := val.([]peer.AddrInfo)
+	if !ok {
+		return nil, fmt.Errorf("unexpected peer result type from singleflight")
 	}
 
-	// Update cache
-	d.cacheMutex.Lock()
-	d.peerCache[rendezvous] = peerCacheEntry{
-		peers:     peers,
-		timestamp: time.Now(),
-	}
-	d.cacheMutex.Unlock()
-
-	res := make([]peer.AddrInfo, len(peers))
-	copy(res, peers)
-	return res, nil
+	// Return a copy so caller mutations cannot corrupt other concurrent callers' views
+	result := make([]peer.AddrInfo, len(peers))
+	copy(result, peers)
+	return result, nil
 }
 
 // InvalidatePeer removes a failed peer from the in-memory cache so subsequent dials

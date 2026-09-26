@@ -123,7 +123,8 @@ Implements core onion circuit negotiation, framing, stream dispatching, and buff
 Encapsulates recursive layered onion wrapping and peeling:
 | Function | Signature | Description |
 |---|---|---|
-| `WrapPayloadWithCiphers(data, ciphers)` | `([]byte, []cipher.AEAD) ([]byte, error)` | Concentric onion encapsulation: allocates isolated buffer per layer (`ciphers[len-1]` innermost → `ciphers[0]` outermost) preventing slice aliasing. |
+| `WrapPayloadWithBuffers(data, ciphers, dst, scratch)` | `([]byte, []cipher.AEAD, []byte, []byte) ([]byte, error)` | Zero-allocation concentric onion encapsulation ping-ponging between `scratch` and `dst`. Outermost layer is guaranteed in `dst`. |
+| `WrapPayloadWithCiphers(data, ciphers, dst)` | `([]byte, []cipher.AEAD, []byte) ([]byte, error)` | Concentric onion encapsulation using pre-instantiated ciphers. |
 | `WrapPayload(data, keys)` | `([]byte, [][]byte) ([]byte, error)` | Instantiates AEAD ciphers for keys and executes `WrapPayloadWithCiphers`. Validates non-empty keys. |
 | `UnwrapPayloadInPlace(data, key)` | `([]byte, []byte) ([]byte, error)` | In-place zero-allocation peeling of exactly one onion encryption layer using symmetric key. |
 | `UnwrapPayloadWithAEADInPlace(data, aead)` | `([]byte, cipher.AEAD) ([]byte, error)` | Peels one encryption layer in-place using pre-existing `cipher.AEAD`. |
