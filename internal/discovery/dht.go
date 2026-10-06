@@ -165,13 +165,15 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 			peers = append(peers, p)
 		}
 
-		// Update cache
-		d.cacheMutex.Lock()
-		d.peerCache[rendezvous] = peerCacheEntry{
-			peers:     peers,
-			timestamp: time.Now(),
+		// Update cache only when peers are found so transient empty queries aren't cached for 45s.
+		if len(peers) > 0 {
+			d.cacheMutex.Lock()
+			d.peerCache[rendezvous] = peerCacheEntry{
+				peers:     peers,
+				timestamp: time.Now(),
+			}
+			d.cacheMutex.Unlock()
 		}
-		d.cacheMutex.Unlock()
 
 		res := make([]peer.AddrInfo, len(peers))
 		copy(res, peers)

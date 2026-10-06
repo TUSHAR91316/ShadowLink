@@ -15,29 +15,43 @@ import (
 // X25519KeySize is the length of an X25519 public key in bytes.
 const X25519KeySize = 32
 
-// PerformECDH is the INITIATOR side of an ephemeral X25519 Diffie-Hellman handshake.
-// It sends its public key first, then reads the peer's public key.
-// Used by: Entry node (to Relay), Relay node (to Exit).
-// Returns a 32-byte derived key ready for use with ChaCha20-Poly1305.
+// PerformECDH is the INITIATOR side of an ephemeral X25519 Diffie-Hellman handshake
+// using the default Exit HKDF info.
+// Deprecated: Prefer PerformECDHWithInfo with config.HKDFInfoRelay or config.HKDFInfoExit for explicit domain separation.
 func PerformECDH(rw io.ReadWriter) ([]byte, error) {
-	return doECDH(rw, true)
+	return doECDH(rw, true, config.HKDFInfoExit)
 }
 
-// RespondECDH is the RESPONDER side of an ephemeral X25519 Diffie-Hellman handshake.
-// It reads the peer's public key first, then sends its own.
-// Used by: Relay node (from Entry), Exit node (from Relay or Entry).
+// PerformECDHWithInfo is the INITIATOR side of an ephemeral X25519 Diffie-Hellman handshake
+// with a custom HKDF domain-separation label.
+// Used by: Entry node (to Relay with HKDFInfoRelay, to Exit with HKDFInfoExit).
 // Returns a 32-byte derived key ready for use with ChaCha20-Poly1305.
+func PerformECDHWithInfo(rw io.ReadWriter, hkdfInfo string) ([]byte, error) {
+	return doECDH(rw, true, hkdfInfo)
+}
+
+// RespondECDH is the RESPONDER side of an ephemeral X25519 Diffie-Hellman handshake
+// using the default Exit HKDF info.
+// Deprecated: Prefer RespondECDHWithInfo with config.HKDFInfoRelay or config.HKDFInfoExit for explicit domain separation.
 func RespondECDH(rw io.ReadWriter) ([]byte, error) {
-	return doECDH(rw, false)
+	return doECDH(rw, false, config.HKDFInfoExit)
+}
+
+// RespondECDHWithInfo is the RESPONDER side of an ephemeral X25519 Diffie-Hellman handshake
+// with a custom HKDF domain-separation label.
+// Used by: Relay node (from Entry with HKDFInfoRelay), Exit node (from Relay or Entry with HKDFInfoExit).
+// Returns a 32-byte derived key ready for use with ChaCha20-Poly1305.
+func RespondECDHWithInfo(rw io.ReadWriter, hkdfInfo string) ([]byte, error) {
+	return doECDH(rw, false, hkdfInfo)
 }
 
 // doECDH performs the X25519 key exchange followed by HKDF-SHA256 key derivation.
 //
 // Both parties generate a fresh ephemeral key pair per session — forward secrecy guaranteed.
 // The raw X25519 shared secret is NOT used directly as an encryption key. Instead, it is
-// passed through HKDF-SHA256 with config.HKDFInfo for domain separation, ensuring the
+// passed through HKDF-SHA256 with hkdfInfo for domain separation, ensuring the
 // derived key material is cryptographically uniform and protocol-bound.
-func doECDH(rw io.ReadWriter, initiator bool) ([]byte, error) {
+func doECDH(rw io.ReadWriter, initiator bool, hkdfInfo string) ([]byte, error) {
 	curve := ecdh.X25519()
 
 	// Generate a fresh, random ephemeral key pair.
@@ -84,8 +98,8 @@ func doECDH(rw io.ReadWriter, initiator bool) ([]byte, error) {
 	}()
 
 	// Derive the final encryption key using HKDF-SHA256.
-	// config.HKDFInfo provides domain separation; changing it is a breaking protocol change.
-	hkdfReader := hkdf.New(sha256.New, rawSecret, nil, []byte(config.HKDFInfo))
+	// hkdfInfo provides domain separation; changing it is a breaking protocol change.
+	hkdfReader := hkdf.New(sha256.New, rawSecret, nil, []byte(hkdfInfo))
 	derivedKey := make([]byte, 32)
 	if _, err := io.ReadFull(hkdfReader, derivedKey); err != nil {
 		return nil, fmt.Errorf("ecdh: HKDF key derivation failed: %w", err)

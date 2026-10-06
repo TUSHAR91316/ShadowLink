@@ -24,3 +24,18 @@ func TestStartEntryNode_InvalidPort(t *testing.T) {
 		t.Error("expected error for port > 65535, got nil")
 	}
 }
+
+func TestStartStopEntryNode(t *testing.T) {
+	node, err := StartEntryNode(0)
+	if err != nil {
+		t.Fatalf("StartEntryNode failed: %v", err)
+	}
+
+	port := node.SOCKSPort()
+	if port <= 0 {
+		t.Errorf("expected positive bound SOCKS port, got %d", port)
+	}
+
+	node.Stop()
+}
+

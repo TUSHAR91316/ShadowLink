@@ -11,6 +11,9 @@ import (
 )
 
 var (
+	// configuredServices stores the list of network services modified by EnableSOCKS5
+	// so that Disable can specifically revert only the services that were configured.
+	// Guarded by serviceMutex to ensure concurrent calls to EnableSOCKS5/Disable are serialized.
 	configuredServices []string
 	serviceMutex       sync.Mutex
 )

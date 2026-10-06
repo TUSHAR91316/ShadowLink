@@ -14,10 +14,12 @@ import (
 // Server is the local SOCKS5 entry proxy that accepts browser/app connections
 // and dials out through the ShadowLink onion circuit.
 type Server struct {
-	port int
-	srv  *socks5lib.Server
-	addr net.Addr
-	mu   sync.RWMutex
+	port      int
+	srv       *socks5lib.Server
+	addr      net.Addr
+	mu        sync.RWMutex
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // Addr returns the network address the server is listening on, or nil if not yet active.
@@ -37,6 +39,11 @@ func (s *Server) Port() int {
 		}
 	}
 	return s.port
+}
+
+// Ready returns a channel that is closed as soon as the server has bound to its listening port.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // DialerFunc is the function signature used to create outbound connections.
@@ -61,13 +68,19 @@ func NewServer(port int, dialer DialerFunc) (*Server, error) {
 		return nil, fmt.Errorf("socks5: failed to create server: %w", err)
 	}
 
-	return &Server{port: port, srv: server}, nil
+	return &Server{
+		port:  port,
+		srv:   server,
+		ready: make(chan struct{}),
+	}, nil
 }
 
 // ListenAndServe binds to the configured port and serves SOCKS5 connections
 // until the ctx is cancelled. Returns nil on clean shutdown; returns the
 // underlying network error on unexpected failure.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	// Binds strictly to 127.0.0.1 loopback interface to prevent unauthenticated
+	// proxy access or network pivoting from the local LAN.
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -80,6 +93,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		s.port = tcpAddr.Port
 	}
 	s.mu.Unlock()
+
+	s.readyOnce.Do(func() {
+		close(s.ready)
+	})
 
 	log.Printf("SOCKS5 proxy listening on %s", listener.Addr().String())
 

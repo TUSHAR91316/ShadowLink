@@ -116,3 +116,51 @@ func TestECDH_EncryptDecryptWithDerivedKey(t *testing.T) {
 		t.Errorf("round-trip mismatch: got %q", pt)
 	}
 }
+
+// TestECDH_WithInfo verifies that PerformECDHWithInfo and RespondECDHWithInfo
+// derive matching keys when given the same HKDF info string.
+func TestECDH_WithInfo(t *testing.T) {
+	initiatorSide, responderSide := makePair()
+
+	var initiatorKey, responderKey []byte
+	var initiatorErr, responderErr error
+
+	done := make(chan struct{})
+	go func() {
+		responderKey, responderErr = RespondECDHWithInfo(responderSide, "custom-info-label")
+		close(done)
+	}()
+
+	initiatorKey, initiatorErr = PerformECDHWithInfo(initiatorSide, "custom-info-label")
+	<-done
+
+	if initiatorErr != nil {
+		t.Fatalf("PerformECDHWithInfo error: %v", initiatorErr)
+	}
+	if responderErr != nil {
+		t.Fatalf("RespondECDHWithInfo error: %v", responderErr)
+	}
+	if !bytes.Equal(initiatorKey, responderKey) {
+		t.Errorf("shared secrets do not match with custom info label")
+	}
+}
+
+// TestECDH_DomainSeparation verifies that different HKDF info labels produce
+// different derived keys even for the same underlying exchange logic.
+func TestECDH_DomainSeparation(t *testing.T) {
+	initiatorSide, responderSide := makePair()
+
+	var initiatorKey, responderKey []byte
+	done := make(chan struct{})
+	go func() {
+		responderKey, _ = RespondECDHWithInfo(responderSide, "label-b")
+		close(done)
+	}()
+
+	initiatorKey, _ = PerformECDHWithInfo(initiatorSide, "label-a")
+	<-done
+
+	if bytes.Equal(initiatorKey, responderKey) {
+		t.Error("different HKDF info labels must produce different derived keys (domain separation failure)")
+	}
+}

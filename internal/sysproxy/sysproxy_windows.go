@@ -43,5 +43,9 @@ func Disable() error {
 		return fmt.Errorf("failed to disable proxy: %v", err)
 	}
 
+	if err := k.SetStringValue("ProxyServer", ""); err != nil {
+		return fmt.Errorf("failed to clear proxy server: %v", err)
+	}
+
 	return nil
 }

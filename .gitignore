@@ -40,6 +40,8 @@ job_log_android.txt
 # Flutter build output
 shadowlink_gui/build/
 shadowlink_gui/.dart_tool/
+shadowlink_gui/android/build/
+shadowlink_gui/android/.gradle/
 
 # Android generated native libs (built by CI)
 shadowlink_gui/android/app/libs/

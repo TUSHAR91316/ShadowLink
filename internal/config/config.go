@@ -35,11 +35,15 @@ const DefaultSOCKSPort = 1080
 // MaxFrameSize caps individual encrypted frames at 128 KiB to prevent OOM-DoS attacks.
 const MaxFrameSize = 128 * 1024
 
-// ─── Crypto ──────────────────────────────────────────────────────────────────
-
-// HKDFInfo is the domain-separation label used during HKDF-SHA256 key derivation.
-// Changing this value is a breaking protocol change.
+// HKDFInfo is the legacy domain-separation label used during HKDF-SHA256 key derivation.
+// Deprecated: Use HKDFInfoRelay or HKDFInfoExit for explicit domain separation across circuit hops.
 const HKDFInfo = "shadowlink/v1/session-key"
+
+// HKDFInfoRelay is the domain-separation label used during HKDF-SHA256 key derivation for relay hops.
+const HKDFInfoRelay = "shadowlink-v2-relay-key"
+
+// HKDFInfoExit is the domain-separation label used during HKDF-SHA256 key derivation for exit hops.
+const HKDFInfoExit = "shadowlink-v2-exit-key"
 
 // ─── Timeouts ────────────────────────────────────────────────────────────────
 

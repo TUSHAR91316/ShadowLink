@@ -88,6 +88,17 @@ func main() {
 		})
 	}
 
+	var proxyConfigured bool
+	defer func() {
+		if proxyConfigured {
+			if err := sysproxy.Disable(); err != nil {
+				log.Printf("Warning: failed to reset system proxy: %v", err)
+			}
+		}
+	}()
+
+	proxyErrCh := make(chan error, 1)
+
 	// ── Entry node setup ───────────────────────────────────────────────────
 	if *isEntry {
 		log.Printf("Starting SOCKS5 proxy on 127.0.0.1:%d", *socksPort)
@@ -104,6 +115,7 @@ func main() {
 		go func() {
 			if err := proxy.ListenAndServe(ctx); err != nil {
 				log.Printf("SOCKS5 proxy error: %v", err)
+				proxyErrCh <- err
 			}
 		}()
 
@@ -111,22 +123,22 @@ func main() {
 			if err := sysproxy.EnableSOCKS5("127.0.0.1", *socksPort); err != nil {
 				log.Printf("Warning: failed to set system proxy: %v", err)
 			} else {
+				proxyConfigured = true
 				log.Println("System proxy configured")
-				// Restore proxy state on shutdown.
-				defer func() {
-					if err := sysproxy.Disable(); err != nil {
-						log.Printf("Warning: failed to reset system proxy: %v", err)
-					}
-				}()
 			}
 		}
 	}
 
-	// ── Block until SIGINT / SIGTERM ───────────────────────────────────────
+	// ── Block until SIGINT / SIGTERM or unexpected proxy fatal error ───────────
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
-	log.Printf("Received signal %s — shutting down gracefully...", sig)
+
+	select {
+	case sig := <-sigCh:
+		log.Printf("Received signal %s — shutting down gracefully...", sig)
+	case err := <-proxyErrCh:
+		log.Printf("Fatal proxy error encountered: %v — terminating...", err)
+	}
 	cancel() // Cancel all active dials and DHT operations.
 }
 

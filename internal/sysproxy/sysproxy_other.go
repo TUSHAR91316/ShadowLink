@@ -13,9 +13,8 @@ func EnableSOCKS5(ip string, port int) error {
 	return nil
 }
 
-// Disable provides a no-op placeholder for macOS/Linux.
-// Returns nil always; no registry manipulation needed on these platforms.
-// Future implementations can use 'networksetup -setwebproxystate' on macOS or 'gsettings' on Linux.
+// Disable provides a no-op placeholder for unsupported platforms (e.g. BSD, Solaris).
+// Returns nil always; manual configuration is required on these platforms.
 func Disable() error {
 	return nil
 }

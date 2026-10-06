@@ -47,7 +47,8 @@ func cryptoShuffle[T any](slice []T) {
 	for i := len(slice) - 1; i > 0; i-- {
 		nBig, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
 		if err != nil {
-			continue
+			log.Printf("cryptoShuffle: CSPRNG error during shuffle: %v", err)
+			return
 		}
 		j := int(nBig.Int64())
 		slice[i], slice[j] = slice[j], slice[i]
@@ -135,8 +136,9 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 					// The exit node failed; invalidate the exit and try the next exit with this relay.
 					ds.InvalidatePeer(config.RendezvousExit, exit.ID)
 				} else {
-					// Fallback invalidation
+					// Fallback invalidation: if unclassified, invalidate both relay and exit so we don't retry a broken path.
 					ds.InvalidatePeer(config.RendezvousRelay, relay.ID)
+					ds.InvalidatePeer(config.RendezvousExit, exit.ID)
 				}
 				continue
 			}
@@ -154,10 +156,10 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 //
 // Protocol:
 //  1. Connect to the relay and send "EXTEND\n<ExitPeerID>\n" in plaintext.
-//  2. ECDH with the relay (Entry = INITIATOR) → relayKey.
+//  2. ECDH with the relay (Entry = INITIATOR) → relayKey using HKDFInfoRelay.
 //  3. The relay connects to the exit and bridges the raw byte stream transparently.
 //  4. Entry sends "CONNECT\n<TargetAddr>\n" encrypted with relayKey through relayConn.
-//  5. ECDH with the exit through the relay → exitKey.
+//  5. ECDH with the exit through the relay → exitKey using HKDFInfoExit.
 //  6. Return a nested libP2PConn: inner is relayConn (relayKey), outer adds exitKey.
 func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exit peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, relay); err != nil {
@@ -184,8 +186,8 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 		return nil, &relayConnectError{err: fmt.Errorf("write EXTEND header: %w", err)}
 	}
 
-	// Step 2: ECDH with the relay.
-	relayKey, err := crypto.PerformECDH(stream)
+	// Step 2: ECDH with the relay using HKDFInfoRelay.
+	relayKey, err := crypto.PerformECDHWithInfo(stream, config.HKDFInfoRelay)
 	if err != nil {
 		return nil, &relayConnectError{err: fmt.Errorf("ECDH with relay: %w", err)}
 	}
@@ -198,8 +200,8 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 		return nil, &exitConnectError{err: fmt.Errorf("write CONNECT header: %w", err)}
 	}
 
-	// Step 4: ECDH with the exit, proxied transparently through the relay.
-	exitKey, err := crypto.PerformECDH(relayConn)
+	// Step 4: ECDH with the exit, proxied transparently through the relay using HKDFInfoExit.
+	exitKey, err := crypto.PerformECDHWithInfo(relayConn, config.HKDFInfoExit)
 	if err != nil {
 		return nil, &exitConnectError{err: fmt.Errorf("ECDH with exit: %w", err)}
 	}
@@ -253,7 +255,7 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 		return nil, fmt.Errorf("write CONNECT header: %w", err)
 	}
 
-	sessionKey, err := crypto.PerformECDH(stream)
+	sessionKey, err := crypto.PerformECDHWithInfo(stream, config.HKDFInfoExit)
 	if err != nil {
 		return nil, fmt.Errorf("ECDH with exit: %w", err)
 	}
@@ -314,12 +316,14 @@ func (c *libP2PConn) initCiphers() {
 	c.onceInit.Do(func() {
 		ciphers := make([]cipher.AEAD, len(c.Keys))
 		for i, k := range c.Keys {
-			if len(k) == chacha20poly1305.KeySize {
-				aead, err := chacha20poly1305.NewX(k)
-				if err == nil {
-					ciphers[i] = aead
-				}
+			if len(k) != chacha20poly1305.KeySize {
+				panic(fmt.Sprintf("initCiphers: key %d has invalid length %d, want %d", i, len(k), chacha20poly1305.KeySize))
 			}
+			aead, err := chacha20poly1305.NewX(k)
+			if err != nil {
+				panic(fmt.Sprintf("initCiphers: failed to instantiate cipher for layer %d: %v", i, err))
+			}
+			ciphers[i] = aead
 		}
 		c.ciphers = ciphers
 	})
@@ -386,7 +390,8 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 
 	n := copy(b, plaintext)
 	if n < len(plaintext) {
-		// plaintext aliases frameBuf; copy the tail into reusable readBuf without fresh heap allocations.
+		// plaintext aliases frameBuf under readMu lock; copy the tail into reusable readBuf
+		// to guarantee memory safety for subsequent Read calls.
 		remaining := len(plaintext) - n
 		if cap(c.readBuf) < remaining {
 			c.readBuf = make([]byte, remaining)
@@ -441,9 +446,6 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 	}
 
 	totalLen := 4 + len(ciphertext)
-	if cap(c.writeBuf) < totalLen {
-		c.writeBuf = make([]byte, totalLen)
-	}
 	c.writeBuf = c.writeBuf[:totalLen]
 
 	// Write 4-byte big-endian length prefix directly into writeBuf header.

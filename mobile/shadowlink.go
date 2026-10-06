@@ -17,6 +17,7 @@ type MobileNode struct {
 	ds     *discovery.DiscoveryService
 	cancel context.CancelFunc
 	proxy  *socks5.Server
+	done   chan struct{}
 }
 
 // StartEntryNode starts a ShadowLink entry node and a local SOCKS5 proxy on
@@ -53,15 +54,30 @@ func StartEntryNode(socksPort int64) (*MobileNode, error) {
 		return nil, fmt.Errorf("mobile: SOCKS5 proxy init failed: %w", err)
 	}
 
+	done := make(chan struct{})
+	startErrCh := make(chan error, 1)
 	go func() {
+		defer close(done)
 		// ListenAndServe returns nil on clean shutdown (ctx cancelled).
 		if err := proxy.ListenAndServe(ctx); err != nil {
+			select {
+			case startErrCh <- err:
+			default:
+			}
 			// Unexpected error — log it. On mobile we cannot os.Exit.
 			fmt.Printf("mobile: SOCKS5 proxy exited with error: %v\n", err)
 		}
 	}()
 
-	return &MobileNode{ds: ds, cancel: cancel, proxy: proxy}, nil
+	select {
+	case err := <-startErrCh:
+		cancel()
+		_ = ds.Host.Close()
+		return nil, fmt.Errorf("mobile: SOCKS5 proxy failed to start: %w", err)
+	case <-proxy.Ready():
+	}
+
+	return &MobileNode{ds: ds, cancel: cancel, proxy: proxy, done: done}, nil
 }
 
 // DefaultSOCKSPort returns the standard SOCKS5 proxy port for this build.
@@ -80,9 +96,14 @@ func (m *MobileNode) SOCKSPort() int64 {
 }
 
 // Stop cleanly shuts down the ShadowLink entry node:
-// it cancels all in-flight circuit dials and closes the libp2p host,
-// freeing the P2P port binding immediately.
+// it cancels all in-flight circuit dials, waits for the SOCKS5 proxy to terminate,
+// and closes the libp2p host, freeing the P2P port binding immediately.
 func (m *MobileNode) Stop() {
 	m.cancel()
-	_ = m.ds.Host.Close()
+	if m.done != nil {
+		<-m.done
+	}
+	if m.ds != nil && m.ds.Host != nil {
+		_ = m.ds.Host.Close()
+	}
 }

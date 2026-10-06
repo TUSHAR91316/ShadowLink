@@ -76,7 +76,7 @@ func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *disc
 			s.Reset() //nolint:errcheck
 			return
 		}
-		handleExit(s, targetAddr)
+		handleExit(ctx, s, targetAddr)
 
 	default:
 		log.Printf("Handler: unknown protocol header %q from %s — dropping stream", firstLine, s.Conn().RemotePeer())
@@ -95,8 +95,10 @@ func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *disc
 func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.DiscoveryService, targetPeerID string) {
 	log.Printf("Relay: extending circuit to exit peer %s", targetPeerID)
 
+	_ = s.SetDeadline(time.Now().Add(15 * time.Second))
+
 	// Step 1: ECDH — relay is RESPONDER (reads entry's key first, then sends its own).
-	relayKey, err := crypto.RespondECDH(rawReadWriter{s, s})
+	relayKey, err := crypto.RespondECDHWithInfo(rawReadWriter{s, s}, config.HKDFInfoRelay)
 	if err != nil {
 		log.Printf("Relay: ECDH with entry failed: %v", err)
 		s.Reset() //nolint:errcheck
@@ -162,11 +164,13 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 //  1. ECDH handshake with upstream (relay or direct entry) → sessionKey.
 //  2. Dial the target on the public internet using a context-aware dialer.
 //  3. Proxy bidirectionally: encrypted dVPN ↔ plaintext internet.
-func handleExit(s libp2pnet.Stream, targetAddr string) {
+func handleExit(ctx context.Context, s libp2pnet.Stream, targetAddr string) {
 	log.Printf("Exit: connecting to %s", targetAddr)
 
+	_ = s.SetDeadline(time.Now().Add(15 * time.Second))
+
 	// Exit is always RESPONDER — reads the upstream peer's public key first.
-	sessionKey, err := crypto.RespondECDH(rawReadWriter{s, s})
+	sessionKey, err := crypto.RespondECDHWithInfo(rawReadWriter{s, s}, config.HKDFInfoExit)
 	if err != nil {
 		log.Printf("Exit: ECDH handshake failed: %v", err)
 		s.Reset() //nolint:errcheck
@@ -176,9 +180,9 @@ func handleExit(s libp2pnet.Stream, targetAddr string) {
 	// Clear stream deadline for data streaming.
 	_ = s.SetDeadline(time.Time{})
 
-	// Use a context-aware dialer with connection timeout.
+	// Use a context-aware dialer with connection timeout derived from parent ctx.
 	var d net.Dialer
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer dialCancel()
 
 	outConn, err := d.DialContext(dialCtx, "tcp", targetAddr)
@@ -231,6 +235,8 @@ func bridge(a, b net.Conn) {
 // the raw ECDH key bytes that immediately follow, permanently losing those bytes.
 //
 // Lines are trimmed of surrounding whitespace (handles both \n and \r\n).
+// A stack-allocated buffer (stackBuf) handles lines <= 128 bytes with 0 allocations.
+// Lines between 129 and maxLineLen bytes dynamically escape to the heap via append.
 // A hard limit of maxLineLen protects against slow-loris attacks where an
 // adversary streams a very long line without a newline to exhaust memory.
 func readLineRaw(r io.Reader) (string, error) {

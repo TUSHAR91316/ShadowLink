@@ -394,4 +394,41 @@ func TestFraming_InvalidFrameLength(t *testing.T) {
 	}
 }
 
+// TestInitCiphers_InvalidKeyPanic verifies that passing invalid key material panics.
+func TestInitCiphers_InvalidKeyPanic(t *testing.T) {
+	s1, _ := newStreamPair(t)
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when constructing libP2PConn with invalid key length, got none")
+		}
+	}()
+	badKey := []byte("short-key")
+	_ = newLibP2PConn(streamAdapter{s1}, [][]byte{badKey})
+}
+
+// TestCryptoShuffle verifies that cryptoShuffle permutes elements without losing or corrupting them.
+func TestCryptoShuffle(t *testing.T) {
+	orig := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	shuffled := make([]int, len(orig))
+	copy(shuffled, orig)
+
+	cryptoShuffle(shuffled)
+
+	if len(shuffled) != len(orig) {
+		t.Fatalf("length changed: got %d, want %d", len(shuffled), len(orig))
+	}
+
+	counts := make(map[int]int)
+	for _, v := range shuffled {
+		counts[v]++
+	}
+	for _, v := range orig {
+		if counts[v] != 1 {
+			t.Errorf("element %d count = %d, want 1", v, counts[v])
+		}
+	}
+}
+
+
 
