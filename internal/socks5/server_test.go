@@ -123,3 +123,53 @@ func TestServer_AddrAndPortInspection(t *testing.T) {
 	<-errCh
 }
 
+
+// TestServer_NoLocalDNSResolution verifies that hostname requests reach the dialer
+// unresolved, so DNS lookups happen at the exit node instead of leaking locally.
+func TestServer_NoLocalDNSResolution(t *testing.T) {
+	gotAddr := make(chan string, 1)
+	dialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		gotAddr <- addr
+		c1, c2 := net.Pipe()
+		go c2.Close()
+		return &tcpAddrConn{c1}, nil
+	}
+	srv, err := NewServer(0, dialer)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.ListenAndServe(ctx) //nolint:errcheck
+	<-srv.Ready()
+
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	host := "unresolvable.shadowlink.invalid"
+	req := []byte{5, 1, 0} // greeting: version 5, one method, no-auth
+	req = append(req, 5, 1, 0, 3, byte(len(host)))
+	req = append(req, host...)
+	req = append(req, 0x01, 0xBB) // port 443
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	select {
+	case addr := <-gotAddr:
+		if addr != host+":443" {
+			t.Errorf("dialer got %q, want %q (hostname must not be resolved locally)", addr, host+":443")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("dialer was never called — hostname was likely resolved locally and failed")
+	}
+}
+
+// tcpAddrConn reports TCP addresses, which go-socks5 requires for its reply.
+type tcpAddrConn struct{ net.Conn }
+
+func (c *tcpAddrConn) LocalAddr() net.Addr  { return &net.TCPAddr{} }
+func (c *tcpAddrConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }

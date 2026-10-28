@@ -63,29 +63,39 @@ func main() {
 
 	// ── Relay / Exit node setup ────────────────────────────────────────────
 	if *isRelay || *isExit {
-		if *isRelay {
-			if err := ds.Announce(ctx, config.RendezvousRelay); err != nil {
-				log.Printf("Warning: failed to announce relay role: %v", err)
-			}
-		}
-		if *isExit {
-			if err := ds.Announce(ctx, config.RendezvousExit); err != nil {
-				log.Printf("Warning: failed to announce exit role: %v", err)
-			}
-		}
-
-		// Determine the role string for logging inside HandleStream.
-		role := "relay"
+		// Determine the role HandleStream enforces for incoming commands.
+		role := config.RoleRelay
 		if *isExit && !*isRelay {
-			role = "exit"
+			role = config.RoleExit
 		} else if *isRelay && *isExit {
-			role = "relay+exit"
+			role = config.RoleRelayExit
 		}
 
+		// Register the handler before announcing so peers that discover us
+		// immediately are not rejected with "protocol not supported".
 		// ctx is captured correctly here — the closure is set once, not per-call.
 		ds.Host.SetStreamHandler(config.ProtocolID, func(s libp2pnet.Stream) {
 			network.HandleStream(ctx, s, role, ds)
 		})
+
+		// Announce in the background: each DHT provide can take up to a minute and
+		// Announce keeps re-advertising for the lifetime of ctx.
+		if *isRelay {
+			go func() {
+				if err := ds.Announce(ctx, config.RendezvousRelay); err != nil {
+					log.Printf("Warning: failed to announce relay role (will retry): %v", err)
+				}
+			}()
+		}
+		if *isExit {
+			go func() {
+				if err := ds.Announce(ctx, config.RendezvousExit); err != nil {
+					log.Printf("Warning: failed to announce exit role (will retry): %v", err)
+				}
+			}()
+		}
+
+		log.Printf("ShadowLink node ready (role=%s)", role)
 	}
 
 	var proxyConfigured bool

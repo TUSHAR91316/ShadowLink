@@ -11,6 +11,7 @@ import (
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/shadowlink/core/internal/config"
 	"github.com/shadowlink/core/internal/crypto"
 )
 
@@ -432,3 +433,80 @@ func TestCryptoShuffle(t *testing.T) {
 
 
 
+
+// TestFraming_WriteLargerThanMaxFrame verifies that a single Write larger than
+// config.MaxFrameSize is split into valid frames instead of producing a frame
+// the receiver rejects as a protocol violation.
+func TestFraming_WriteLargerThanMaxFrame(t *testing.T) {
+	writer, reader := makeLibP2PConnPair(t)
+	large := make([]byte, 3*config.MaxFrameSize+123)
+	for i := range large {
+		large[i] = byte(i % 253)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		n, err := writer.Write(large)
+		if err == nil && n != len(large) {
+			err = io.ErrShortWrite
+		}
+		errCh <- err
+	}()
+
+	received := make([]byte, len(large))
+	if _, err := io.ReadFull(reader, received); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !bytes.Equal(received, large) {
+		t.Error("oversized payload round-trip mismatch")
+	}
+}
+
+// TestFraming_NestedLargeWrite verifies an oversized write through a two-layer
+// (relay + exit) conn stack, where the inner conn re-frames the outer frames.
+func TestFraming_NestedLargeWrite(t *testing.T) {
+	s1, s2 := newStreamPair(t)
+	relayKey, _ := crypto.GenerateKey()
+	exitKey, _ := crypto.GenerateKey()
+
+	entry := newLibP2PConn(newLibP2PConn(streamAdapter{s1}, [][]byte{relayKey}), [][]byte{exitKey})
+	exit := newLibP2PConn(newLibP2PConn(streamAdapter{s2}, [][]byte{relayKey}), [][]byte{exitKey})
+
+	large := make([]byte, 2*config.MaxFrameSize)
+	for i := range large {
+		large[i] = byte(i % 241)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := entry.Write(large)
+		errCh <- err
+	}()
+
+	received := make([]byte, len(large))
+	if _, err := io.ReadFull(exit, received); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !bytes.Equal(received, large) {
+		t.Error("nested oversized payload round-trip mismatch")
+	}
+}
+
+// TestFraming_NoKeysReadFails verifies a conn without session keys refuses to
+// return raw wire bytes as plaintext.
+func TestFraming_NoKeysReadFails(t *testing.T) {
+	s1, _ := newStreamPair(t)
+	c := newLibP2PConn(streamAdapter{s1}, nil)
+	if _, err := c.Read(make([]byte, 16)); err == nil {
+		t.Error("Read without session keys must fail")
+	}
+	if _, err := c.Write([]byte("x")); err == nil {
+		t.Error("Write without session keys must fail")
+	}
+}

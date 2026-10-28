@@ -71,6 +71,11 @@ func cryptoShuffle[T any](slice []T) {
 func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetwork, targetAddr string) (net.Conn, error) {
 	log.Printf("DialCircuit: building circuit for %s", targetAddr)
 
+	// Bound the whole circuit build. The SOCKS5 server passes a context with no
+	// deadline, so without this a black-holed peer could stall a client forever.
+	ctx, cancel := context.WithTimeout(ctx, config.DefaultConnectionTimeout)
+	defer cancel()
+
 	// Concurrently query exit and relay nodes to halve initial circuit discovery latency.
 	var exits, relays []peer.AddrInfo
 	var exitErr error
@@ -86,8 +91,11 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 	}()
 	wg.Wait()
 
-	if exitErr != nil || len(exits) == 0 {
-		return nil, fmt.Errorf("no exit nodes found in DHT: %w", exitErr)
+	if exitErr != nil {
+		return nil, fmt.Errorf("exit node lookup failed: %w", exitErr)
+	}
+	if len(exits) == 0 {
+		return nil, errors.New("no exit nodes found in DHT")
 	}
 	// Cryptographically shuffle exit list to randomise routing.
 	cryptoShuffle(exits)
@@ -114,7 +122,9 @@ func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetw
 func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, relay := range relays {
-		relayDead := false
+		if ctx.Err() != nil {
+			break
+		}
 		for _, exit := range exits {
 			if relay.ID == exit.ID {
 				continue // Never use the same node as both relay and exit
@@ -123,6 +133,10 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 			if err != nil {
 				log.Printf("Relay %s -> Exit %s failed: %v", relay.ID, exit.ID, err)
 				lastErr = err
+				if ctx.Err() != nil {
+					// Out of time budget — the peers are not at fault, so keep them cached.
+					return nil, fmt.Errorf("circuit build aborted: %w", err)
+				}
 
 				var rErr *relayConnectError
 				var eErr *exitConnectError
@@ -130,7 +144,6 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 					// The relay node itself is unresponsive; invalidate it and break the inner loop
 					// so we don't waste time trying all other exit nodes with this dead relay.
 					ds.InvalidatePeer(config.RendezvousRelay, relay.ID)
-					relayDead = true
 					break
 				} else if errors.As(err, &eErr) {
 					// The exit node failed; invalidate the exit and try the next exit with this relay.
@@ -145,9 +158,12 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 			log.Printf("3-hop circuit established: Entry -> %s -> %s -> Target", relay.ID, exit.ID)
 			return conn, nil
 		}
-		if relayDead {
-			continue
-		}
+	}
+	if lastErr == nil {
+		lastErr = ctx.Err()
+	}
+	if lastErr == nil {
+		return nil, errors.New("no usable relay/exit combination (relay and exit are the same node)")
 	}
 	return nil, fmt.Errorf("all relay/exit combinations failed: %w", lastErr)
 }
@@ -219,10 +235,16 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 func dialDirect(ctx context.Context, ds *discovery.DiscoveryService, exits []peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	var lastErr error
 	for _, exitNode := range exits {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("circuit build aborted: %w", err)
+		}
 		conn, err := tryDirect(ctx, ds, exitNode, targetAddr)
 		if err != nil {
 			log.Printf("Exit node %s failed: %v, trying next...", exitNode.ID, err)
 			lastErr = err
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("circuit build aborted: %w", err)
+			}
 			ds.InvalidatePeer(config.RendezvousExit, exitNode.ID)
 			continue
 		}
@@ -281,6 +303,14 @@ func (s streamAdapter) RemoteAddr() net.Addr { return &net.TCPAddr{} }
 
 // ─── libP2PConn ──────────────────────────────────────────────────────────────
 
+// frameOverhead is the per-layer AEAD cost: 24-byte XChaCha20 nonce + 16-byte Poly1305 tag.
+const frameOverhead = chacha20poly1305.NonceSizeX + chacha20poly1305.Overhead
+
+// maxWriteChunk is the largest plaintext carried by a single frame. Keeping it at half
+// of config.MaxFrameSize leaves room for every onion layer, so a nested conn's frame
+// (chunk + its own header and overhead) still fits inside one frame of the conn below.
+const maxWriteChunk = config.MaxFrameSize / 2
+
 // libP2PConn wraps any net.Conn to provide layered onion encryption and
 // 4-byte big-endian length-prefix framing.
 //
@@ -337,6 +367,11 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
+	if len(c.ciphers) == 0 {
+		// Never hand raw wire bytes to the caller as if they were decrypted plaintext.
+		return 0, errors.New("decryption failed: no session keys available")
+	}
+
 	// Drain any leftover plaintext from a prior partial read.
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
@@ -351,9 +386,9 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 	}
 	frameLen := binary.BigEndian.Uint32(lenBuf[:])
 
-	// Enforce frame size bounds (minimum 40 bytes: 24-byte nonce + 16-byte Poly1305 AEAD tag).
-	if frameLen < 40 || frameLen > config.MaxFrameSize {
-		return 0, fmt.Errorf("invalid frame length %d (must be between 40 and %d): possible protocol violation", frameLen, config.MaxFrameSize)
+	// Enforce frame size bounds (minimum one layer: 24-byte nonce + 16-byte Poly1305 AEAD tag).
+	if frameLen < frameOverhead || frameLen > config.MaxFrameSize {
+		return 0, fmt.Errorf("invalid frame length %d (must be between %d and %d): possible protocol violation", frameLen, frameOverhead, config.MaxFrameSize)
 	}
 
 	// Grow the reusable frameBuf only when the incoming frame is larger than any seen so far.
@@ -367,24 +402,11 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 
 	// Peel each encryption layer in order (outermost first) using zero-allocation in-place decryption.
 	plaintext := frame
-	var err error
-	if len(c.ciphers) > 0 {
-		for i, aead := range c.ciphers {
-			if aead == nil {
-				plaintext, err = onion.UnwrapPayload(plaintext, c.Keys[i])
-			} else {
-				plaintext, err = onion.UnwrapPayloadInPlace(plaintext, aead)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("decryption layer %d failed: %w", i, err)
-			}
-		}
-	} else {
-		for _, key := range c.Keys {
-			plaintext, err = onion.UnwrapPayload(plaintext, key)
-			if err != nil {
-				return 0, fmt.Errorf("decryption failed: %w", err)
-			}
+	for i, aead := range c.ciphers {
+		var err error
+		plaintext, err = onion.UnwrapPayloadInPlace(plaintext, aead)
+		if err != nil {
+			return 0, fmt.Errorf("decryption layer %d failed: %w", i, err)
 		}
 	}
 
@@ -403,9 +425,11 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 	return n, nil
 }
 
-// Write encrypts b with all session keys and sends it as a single framed message:
-// [4-byte BE length][ciphertext].
+// Write encrypts b with all session keys and sends it as one or more framed
+// messages: [4-byte BE length][ciphertext].
 //
+// Payloads larger than maxWriteChunk are split across several frames, because the
+// receiver rejects any frame above config.MaxFrameSize as a protocol violation.
 // Optimized with reusable writeBuf and scratchBuf to eliminate heap allocations per write.
 func (c *libP2PConn) Write(b []byte) (int, error) {
 	c.initCiphers()
@@ -413,51 +437,54 @@ func (c *libP2PConn) Write(b []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	// Calculate needed buffer size for all cipher layers: 4 + len(b) + layers*(24+16)
-	overheadPerLayer := 40 // 24 nonce + 16 poly1305 tag
-	numLayers := len(c.Keys)
-	if numLayers == 0 {
-		return 0, fmt.Errorf("encryption failed: no session keys available")
+	if len(c.ciphers) == 0 {
+		return 0, errors.New("encryption failed: no session keys available")
 	}
 
-	needed := 4 + len(b) + numLayers*overheadPerLayer
+	written := 0
+	for written < len(b) {
+		chunk := b[written:]
+		if len(chunk) > maxWriteChunk {
+			chunk = chunk[:maxWriteChunk]
+		}
+		if err := c.writeFrame(chunk); err != nil {
+			return written, err
+		}
+		written += len(chunk)
+	}
+	return written, nil
+}
+
+// writeFrame wraps p in every onion layer and writes it as a single frame.
+// The caller must hold writeMu.
+func (c *libP2PConn) writeFrame(p []byte) error {
+	numLayers := len(c.ciphers)
+	needed := 4 + len(p) + numLayers*frameOverhead
 	if cap(c.writeBuf) < needed {
 		c.writeBuf = make([]byte, needed)
 	}
 
-	var ciphertext []byte
-	var err error
-
-	if len(c.ciphers) > 0 {
-		if numLayers > 1 {
-			scratchNeeded := len(b) + (numLayers-1)*overheadPerLayer
-			if cap(c.scratchBuf) < scratchNeeded {
-				c.scratchBuf = make([]byte, scratchNeeded)
-			}
-			ciphertext, err = onion.WrapPayloadWithBuffers(b, c.ciphers, c.writeBuf[4:4], c.scratchBuf[:0])
-		} else {
-			ciphertext, err = onion.WrapPayloadWithBuffers(b, c.ciphers, c.writeBuf[4:4], nil)
+	var scratch []byte
+	if numLayers > 1 {
+		scratchNeeded := len(p) + (numLayers-1)*frameOverhead
+		if cap(c.scratchBuf) < scratchNeeded {
+			c.scratchBuf = make([]byte, scratchNeeded)
 		}
-	} else {
-		ciphertext, err = onion.WrapPayload(b, c.Keys)
+		scratch = c.scratchBuf[:0]
 	}
+
+	ciphertext, err := onion.WrapPayloadWithBuffers(p, c.ciphers, c.writeBuf[4:4], scratch)
 	if err != nil {
-		return 0, fmt.Errorf("encryption failed: %w", err)
+		return fmt.Errorf("encryption failed: %w", err)
 	}
 
-	totalLen := 4 + len(ciphertext)
-	c.writeBuf = c.writeBuf[:totalLen]
-
-	// Write 4-byte big-endian length prefix directly into writeBuf header.
-	binary.BigEndian.PutUint32(c.writeBuf[:4], uint32(len(ciphertext)))
-
-	if len(ciphertext) > 0 && &ciphertext[0] != &c.writeBuf[4] {
-		copy(c.writeBuf[4:], ciphertext)
+	frame := c.writeBuf[:4+len(ciphertext)]
+	// Write 4-byte big-endian length prefix directly into the frame header.
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(ciphertext)))
+	if &ciphertext[0] != &frame[4] {
+		copy(frame[4:], ciphertext)
 	}
 
-	if _, err := c.Conn.Write(c.writeBuf); err != nil {
-		return 0, err
-	}
-
-	return len(b), nil
+	_, err = c.Conn.Write(frame)
+	return err
 }

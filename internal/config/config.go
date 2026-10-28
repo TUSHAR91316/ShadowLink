@@ -22,6 +22,17 @@ const RendezvousRelay = "shadowlink-relay"
 // RendezvousExit is the DHT rendezvous key used by exit nodes to announce themselves.
 const RendezvousExit = "shadowlink-exit"
 
+// ─── Node Roles ──────────────────────────────────────────────────────────────
+
+// RoleRelay, RoleExit and RoleRelayExit name the roles a node can serve incoming
+// streams under. A node only honours the commands its role allows, so a relay-only
+// node never egresses traffic to the internet on behalf of peers.
+const (
+	RoleRelay     = "relay"
+	RoleExit      = "exit"
+	RoleRelayExit = "relay+exit"
+)
+
 // ─── Ports ───────────────────────────────────────────────────────────────────
 
 // DefaultP2PPort is the default port for incoming libp2p P2P connections.
@@ -47,9 +58,17 @@ const HKDFInfoExit = "shadowlink-v2-exit-key"
 
 // ─── Timeouts ────────────────────────────────────────────────────────────────
 
-// DefaultConnectionTimeout is the maximum time an entry node waits for the
-// SOCKS5 proxy to report a successful circuit before giving up.
+// DefaultConnectionTimeout is the maximum time an entry node spends building a
+// circuit (peer discovery plus every relay/exit attempt) before giving up.
 const DefaultConnectionTimeout = 30 * time.Second
+
+// PeerLookupTimeout bounds a single DHT rendezvous lookup so a slow query cannot
+// consume the whole circuit-building budget.
+const PeerLookupTimeout = 15 * time.Second
+
+// AnnounceRetryInterval is how long a relay/exit node waits before retrying a
+// failed DHT advertisement (e.g. when the routing table is still empty at startup).
+const AnnounceRetryInterval = 2 * time.Minute
 
 // ─── File Names ──────────────────────────────────────────────────────────────
 

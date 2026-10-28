@@ -3,6 +3,8 @@ package network
 import (
 	"strings"
 	"testing"
+
+	"github.com/shadowlink/core/internal/config"
 )
 
 // TestReadLineRaw_Simple verifies a normal newline-terminated line is parsed correctly.
@@ -78,3 +80,46 @@ func TestReadLineRaw_ExceedsMaxLineLen(t *testing.T) {
 	}
 }
 
+
+// TestRoleAllows verifies each role only serves the commands it opted into —
+// in particular that a relay-only node never acts as an exit.
+func TestRoleAllows(t *testing.T) {
+	cases := []struct {
+		role, cmd string
+		want      bool
+	}{
+		{config.RoleRelay, config.ExtendHeader, true},
+		{config.RoleRelay, config.ConnectHeader, false},
+		{config.RoleExit, config.ConnectHeader, true},
+		{config.RoleExit, config.ExtendHeader, false},
+		{config.RoleRelayExit, config.ExtendHeader, true},
+		{config.RoleRelayExit, config.ConnectHeader, true},
+		{config.RoleRelayExit, "BOGUS", false},
+		{"", config.ConnectHeader, false},
+	}
+	for _, c := range cases {
+		if got := roleAllows(c.role, c.cmd); got != c.want {
+			t.Errorf("roleAllows(%q, %q) = %v, want %v", c.role, c.cmd, got, c.want)
+		}
+	}
+}
+
+// TestExitDialControl verifies exits refuse internal targets but allow public ones.
+func TestExitDialControl(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1:80", "[::1]:80", "10.1.2.3:22", "192.168.1.1:80", "172.16.0.5:443",
+		"169.254.169.254:80", "[fe80::1]:80", "[fc00::1]:80", "0.0.0.0:80",
+		"100.64.0.1:80", "255.255.255.255:80", "224.0.0.1:80", "[::ffff:127.0.0.1]:80",
+	}
+	for _, addr := range blocked {
+		if err := exitDialControl("tcp", addr, nil); err == nil {
+			t.Errorf("exitDialControl(%s) = nil, want refusal", addr)
+		}
+	}
+	allowed := []string{"1.1.1.1:443", "93.184.216.34:80", "[2606:4700:4700::1111]:443"}
+	for _, addr := range allowed {
+		if err := exitDialControl("tcp", addr, nil); err != nil {
+			t.Errorf("exitDialControl(%s) = %v, want nil", addr, err)
+		}
+	}
+}

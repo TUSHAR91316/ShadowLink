@@ -51,6 +51,18 @@ func (s *Server) Ready() <-chan struct{} {
 // dialing TCP directly.
 type DialerFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
+// remoteResolver defers name resolution to the far end of the circuit.
+//
+// go-socks5's default resolver looks up every requested hostname with the local
+// system DNS before dialing, which leaks the user's browsing destinations to
+// their ISP/LAN resolver. Returning a nil IP makes the library hand the dialer
+// the original "host:port", so the exit node performs the lookup instead.
+type remoteResolver struct{}
+
+func (remoteResolver) Resolve(ctx context.Context, _ string) (context.Context, net.IP, error) {
+	return ctx, nil, nil
+}
+
 // NewServer creates a SOCKS5 proxy server that uses dialer for all outbound
 // connections. If dialer is nil, a safe direct-TCP fallback is used (useful for
 // local testing without a live dVPN network).
@@ -63,7 +75,10 @@ func NewServer(port int, dialer DialerFunc) (*Server, error) {
 		}
 	}
 
-	server, err := socks5lib.New(&socks5lib.Config{Dial: dialer})
+	server, err := socks5lib.New(&socks5lib.Config{
+		Dial:     dialer,
+		Resolver: remoteResolver{},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("socks5: failed to create server: %w", err)
 	}

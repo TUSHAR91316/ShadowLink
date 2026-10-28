@@ -6,8 +6,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
@@ -44,15 +46,21 @@ func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *disc
 	log.Printf("Incoming stream from %s (local role: %s)", s.Conn().RemotePeer(), role)
 	defer s.Close()
 
-	// Enforce a 15-second handshake deadline on the initial control command
+	// Enforce a handshake deadline on the initial control command
 	// to prevent slow-loris connection stalling.
-	_ = s.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = s.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	// Read one byte at a time — bufio would pre-fetch past the newline into the
 	// raw ECDH public-key bytes, permanently corrupting the handshake.
 	firstLine, err := readLineRaw(s)
 	if err != nil {
 		log.Printf("Handler: failed to read first line from %s: %v", s.Conn().RemotePeer(), err)
+		s.Reset() //nolint:errcheck
+		return
+	}
+
+	if !roleAllows(role, firstLine) {
+		log.Printf("Handler: %q not permitted for local role %q — dropping stream from %s", firstLine, role, s.Conn().RemotePeer())
 		s.Reset() //nolint:errcheck
 		return
 	}
@@ -95,7 +103,12 @@ func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *disc
 func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.DiscoveryService, targetPeerID string) {
 	log.Printf("Relay: extending circuit to exit peer %s", targetPeerID)
 
-	_ = s.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = s.SetDeadline(time.Now().Add(handshakeTimeout))
+
+	// The entry gives up after handshakeTimeout, so bound the exit lookup, connect
+	// and stream setup by the same budget instead of the process-lifetime ctx.
+	setupCtx, cancelSetup := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancelSetup()
 
 	// Step 1: ECDH — relay is RESPONDER (reads entry's key first, then sends its own).
 	relayKey, err := crypto.RespondECDHWithInfo(rawReadWriter{s, s}, config.HKDFInfoRelay)
@@ -118,7 +131,7 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 		exitAddrInfo = pInfo
 	} else if ds.DHT != nil {
 		var err error
-		exitAddrInfo, err = ds.DHT.FindPeer(ctx, exitID)
+		exitAddrInfo, err = ds.DHT.FindPeer(setupCtx, exitID)
 		if err != nil {
 			log.Printf("Relay: DHT lookup for exit %s failed: %v", exitID, err)
 			s.Reset() //nolint:errcheck
@@ -130,13 +143,13 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 		return
 	}
 
-	if err := ds.Host.Connect(ctx, exitAddrInfo); err != nil {
+	if err := ds.Host.Connect(setupCtx, exitAddrInfo); err != nil {
 		log.Printf("Relay: connect to exit %s failed: %v", exitID, err)
 		s.Reset() //nolint:errcheck
 		return
 	}
 
-	exitStream, err := ds.Host.NewStream(ctx, exitID, config.ProtocolID)
+	exitStream, err := ds.Host.NewStream(setupCtx, exitID, config.ProtocolID)
 	if err != nil {
 		log.Printf("Relay: open stream to exit %s failed: %v", exitID, err)
 		s.Reset() //nolint:errcheck
@@ -167,7 +180,7 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 func handleExit(ctx context.Context, s libp2pnet.Stream, targetAddr string) {
 	log.Printf("Exit: connecting to %s", targetAddr)
 
-	_ = s.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = s.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	// Exit is always RESPONDER — reads the upstream peer's public key first.
 	sessionKey, err := crypto.RespondECDHWithInfo(rawReadWriter{s, s}, config.HKDFInfoExit)
@@ -181,8 +194,10 @@ func handleExit(ctx context.Context, s libp2pnet.Stream, targetAddr string) {
 	_ = s.SetDeadline(time.Time{})
 
 	// Use a context-aware dialer with connection timeout derived from parent ctx.
-	var d net.Dialer
-	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
+	// Control refuses loopback/private/link-local targets so peers cannot use this
+	// exit to reach the operator's own machine or LAN (SSRF).
+	d := net.Dialer{Control: exitDialControl}
+	dialCtx, dialCancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer dialCancel()
 
 	outConn, err := d.DialContext(dialCtx, "tcp", targetAddr)
@@ -197,6 +212,60 @@ func handleExit(ctx context.Context, s libp2pnet.Stream, targetAddr string) {
 	log.Printf("Exit: circuit active — proxying to %s", targetAddr)
 
 	bridge(wrapper, outConn)
+}
+
+// roleAllows reports whether a node running under role may serve the given
+// protocol command. Without this check a relay-only node would accept CONNECT
+// and silently egress third-party traffic from its own IP.
+func roleAllows(role, command string) bool {
+	switch command {
+	case config.ExtendHeader:
+		return role == config.RoleRelay || role == config.RoleRelayExit
+	case config.ConnectHeader:
+		return role == config.RoleExit || role == config.RoleRelayExit
+	default:
+		return false
+	}
+}
+
+// blockedExitPrefixes lists special-purpose IPv4 ranges that netip's helpers
+// do not classify as non-public but that an exit node must never dial.
+var blockedExitPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),     // "this network"
+	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),   // reserved + limited broadcast
+}
+
+// isPublicAddr reports whether ip is a globally routable unicast address.
+func isPublicAddr(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	for _, p := range blockedExitPrefixes {
+		if p.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// exitDialControl rejects connections to non-public addresses. It runs after DNS
+// resolution, so hostnames that resolve to internal addresses are refused too.
+func exitDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return err
+	}
+	if !isPublicAddr(ip) {
+		return fmt.Errorf("exit: refusing to dial non-public address %s", ip)
+	}
+	return nil
 }
 
 // bridge proxies data bidirectionally between two net.Conn connections.

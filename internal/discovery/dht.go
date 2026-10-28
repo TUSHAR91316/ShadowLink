@@ -15,6 +15,8 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/shadowlink/core/internal/config"
 )
 
 // peerCacheTTL is the duration for which discovered DHT peers are cached.
@@ -30,6 +32,7 @@ type peerCacheEntry struct {
 type DiscoveryService struct {
 	Host         host.Host
 	DHT          *dht.IpfsDHT
+	ctx          context.Context // service lifetime; parents coalesced DHT lookups
 	peerCache    map[string]peerCacheEntry
 	cacheMutex   sync.RWMutex
 	requestGroup singleflight.Group
@@ -59,6 +62,11 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}
 
+	if idht == nil {
+		_ = h.Close()
+		return nil, fmt.Errorf("libp2p host created without a DHT router")
+	}
+
 	log.Printf("Host created: ID=%s, listening on %s", h.ID(), listenAddr)
 
 	// Connect to bootstrap peers concurrently with bounded timeout for fast startup.
@@ -67,12 +75,14 @@ func NewDiscoveryService(ctx context.Context, listenPort int, bootstrapPeers []s
 	}
 
 	if err := idht.Bootstrap(ctx); err != nil {
+		_ = h.Close() // release the listen port instead of leaking the host
 		return nil, fmt.Errorf("DHT bootstrap failed: %w", err)
 	}
 
 	return &DiscoveryService{
 		Host:      h,
 		DHT:       idht,
+		ctx:       ctx,
 		peerCache: make(map[string]peerCacheEntry),
 	}, nil
 }
@@ -111,15 +121,44 @@ func connectToBootstrapPeers(ctx context.Context, h host.Host, bootstrapPeers []
 
 // Announce registers this node under a rendezvous string in the DHT,
 // making it discoverable by peers calling FindPeers with the same string.
+//
+// DHT provider records expire, so after the first attempt Announce keeps
+// re-advertising in the background until ctx is cancelled: shortly before each
+// record's TTL lapses, or every config.AnnounceRetryInterval after a failure
+// (e.g. an empty routing table right after startup). The returned error is
+// that of the first attempt only.
 func (d *DiscoveryService) Announce(ctx context.Context, rendezvous string) error {
 	routingDiscovery := routing.NewRoutingDiscovery(d.DHT)
-	_, err := routingDiscovery.Advertise(ctx, rendezvous)
+	ttl, err := d.advertise(ctx, routingDiscovery, rendezvous)
+	go d.readvertiseLoop(ctx, routingDiscovery, rendezvous, ttl, err)
+	return err
+}
+
+func (d *DiscoveryService) advertise(ctx context.Context, rd *routing.RoutingDiscovery, rendezvous string) (time.Duration, error) {
+	ttl, err := rd.Advertise(ctx, rendezvous)
 	if err != nil {
 		log.Printf("Warning: Failed to advertise on DHT for %q: %v", rendezvous, err)
-		return err
+		return 0, err
 	}
 	log.Printf("Announcing presence on DHT rendezvous: %q", rendezvous)
-	return nil
+	return ttl, nil
+}
+
+func (d *DiscoveryService) readvertiseLoop(ctx context.Context, rd *routing.RoutingDiscovery, rendezvous string, ttl time.Duration, lastErr error) {
+	for {
+		wait := config.AnnounceRetryInterval
+		if lastErr == nil && ttl > 0 {
+			wait = ttl * 7 / 8
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		ttl, lastErr = d.advertise(ctx, rd, rendezvous)
+	}
 }
 
 // FindPeers discovers other nodes announcing a specific rendezvous string.
@@ -139,7 +178,9 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 	d.cacheMutex.RUnlock()
 
 	// Singleflight coalesces all concurrent cache misses for the same rendezvous key into a single DHT query.
-	val, err, _ := d.requestGroup.Do(rendezvous, func() (any, error) {
+	// The shared query runs under the service context (not the first caller's), so one
+	// cancelled SOCKS5 request cannot abort or truncate the lookup for every waiter.
+	resCh := d.requestGroup.DoChan(rendezvous, func() (any, error) {
 		// Double-check cache inside singleflight in case a concurrent caller just populated it
 		d.cacheMutex.RLock()
 		if entry, found := d.peerCache[rendezvous]; found && time.Since(entry.timestamp) < peerCacheTTL && len(entry.peers) > 0 {
@@ -150,8 +191,11 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 		}
 		d.cacheMutex.RUnlock()
 
+		lookupCtx, cancel := context.WithTimeout(d.lifetime(), config.PeerLookupTimeout)
+		defer cancel()
+
 		routingDiscovery := routing.NewRoutingDiscovery(d.DHT)
-		peerChan, err := routingDiscovery.FindPeers(ctx, rendezvous)
+		peerChan, err := routingDiscovery.FindPeers(lookupCtx, rendezvous)
 		if err != nil {
 			return nil, err
 		}
@@ -175,16 +219,20 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 			d.cacheMutex.Unlock()
 		}
 
-		res := make([]peer.AddrInfo, len(peers))
-		copy(res, peers)
-		return res, nil
+		return peers, nil
 	})
 
-	if err != nil {
-		return nil, err
+	var res singleflight.Result
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res = <-resCh:
+	}
+	if res.Err != nil {
+		return nil, res.Err
 	}
 
-	peers, ok := val.([]peer.AddrInfo)
+	peers, ok := res.Val.([]peer.AddrInfo)
 	if !ok {
 		return nil, fmt.Errorf("unexpected peer result type from singleflight")
 	}
@@ -193,6 +241,14 @@ func (d *DiscoveryService) FindPeers(ctx context.Context, rendezvous string) ([]
 	result := make([]peer.AddrInfo, len(peers))
 	copy(result, peers)
 	return result, nil
+}
+
+// lifetime returns the context that bounds background DHT work for this service.
+func (d *DiscoveryService) lifetime() context.Context {
+	if d.ctx != nil {
+		return d.ctx
+	}
+	return context.Background()
 }
 
 // InvalidatePeer removes a failed peer from the in-memory cache so subsequent dials
