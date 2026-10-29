@@ -4,27 +4,29 @@ import 'package:flutter/material.dart';
 /// inspired by Proton VPN, ExpressVPN, and modern decentralized cyber-security suites.
 class AppTheme {
   // ─── Canvas & Surface Substrates ───────────────────────────────────────────
-  static const Color background = Color(0xFF090D12);       // Deep Obsidian Canvas
-  static const Color surface = Color(0xFF101419);          // Sub-surface base
-  static const Color surfaceLow = Color(0xFF181C21);       // Subtle panel base
-  static const Color surfaceContainer = Color(0xFF1C2025); // Elevated card level
-  static const Color surfaceHigh = Color(0xFF262A30);      // High-contrast module
-  static const Color cardGlass = Color(0xFF111827);        // Frosted acrylic cards
+  static const Color background = Color(0xFF090D12); // Deep Obsidian Canvas
+  static const Color surface = Color(0xFF101419); // Sub-surface base
+  static const Color surfaceLow = Color(0xFF181C21); // Subtle panel base
+  static const Color surfaceContainer =
+      Color(0xFF1C2025); // Elevated card level
+  static const Color surfaceHigh = Color(0xFF262A30); // High-contrast module
+  static const Color cardGlass = Color(0xFF111827); // Frosted acrylic cards
 
   // ─── Cyber Accents & Defense States ─────────────────────────────────────────
-  static const Color primary = Color(0xFF10B981);          // Active Node Emerald
-  static const Color primaryBright = Color(0xFF4EDEA3);    // Specular Emerald
-  static const Color secondary = Color(0xFF06B6D4);        // Telemetry Cyan
-  static const Color secondaryBright = Color(0xFF4CD7F6);  // Light Cyan Highlight
-  static const Color error = Color(0xFFEF4444);            // Killswitch Crimson
-  static const Color warning = Color(0xFFF59E0B);          // Precautionary Amber
+  static const Color primary = Color(0xFF10B981); // Active Node Emerald
+  static const Color primaryBright = Color(0xFF4EDEA3); // Specular Emerald
+  static const Color secondary = Color(0xFF06B6D4); // Telemetry Cyan
+  static const Color secondaryBright =
+      Color(0xFF4CD7F6); // Light Cyan Highlight
+  static const Color error = Color(0xFFEF4444); // Killswitch Crimson
+  static const Color warning = Color(0xFFF59E0B); // Precautionary Amber
 
   // ─── Typography & Neutrals ──────────────────────────────────────────────────
-  static const Color textMain = Color(0xFFE0E2EA);         // High-contrast primary text
-  static const Color textMuted = Color(0xFF86948A);        // Muted labels & telemetry
-  static const Color borderSubtle = Color(0x1FFFFFFF);     // 12% white boundary
-  static const Color borderEmerald = Color(0x4D10B981);    // 30% emerald neon aura
-  static const Color borderCyan = Color(0x4D06B6D4);       // 30% cyan neon aura
+  static const Color textMain = Color(0xFFE0E2EA); // High-contrast primary text
+  static const Color textMuted = Color(0xFF86948A); // Muted labels & telemetry
+  static const Color borderSubtle = Color(0x1FFFFFFF); // 12% white boundary
+  static const Color borderEmerald = Color(0x4D10B981); // 30% emerald neon aura
+  static const Color borderCyan = Color(0x4D06B6D4); // 30% cyan neon aura
 
   // ─── Common BoxDecorations ──────────────────────────────────────────────────
   static BoxDecoration glassCard({

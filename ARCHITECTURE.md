@@ -33,8 +33,8 @@ graph TD
 
     Core <-->|"Check Cache (<1ms) / DHT Query"| PeerCache
     PeerCache <-->|"Refresh expired peers"| DHT
-    RelayNode <-->|"Announce('shadowlink-relay')"| DHT
-    ExitNode <-->|"Announce('shadowlink-exit')"| DHT
+    RelayNode <-->|"Announce('shadowlink-v2-relay')"| DHT
+    ExitNode <-->|"Announce('shadowlink-v2-exit')"| DHT
 
     Core -->|"Outer Wrap: Encrypt(RelayKey)"| RelayNode
     RelayNode -->|"Inner Wrap: Encrypt(ExitKey)"| ExitNode
@@ -63,17 +63,20 @@ sequenceDiagram
 
     Note over R,X: Phase 2 — Relay Bridges to Exit [15s Deadline]
     R->>X: DHT Lookup & Connect to ExitPeerID
-    R->>X: Stream Open (/shadowlink/1.0.0)
+    R->>X: Stream Open (/shadowlink/2.0.0)
     Note over R: Relay establishes transparent bidirectional bridge (32 KiB sync.Pool)
 
     Note over E,X: Phase 3 — End-to-End Entry to Exit Handshake (Through Relay) [15s Deadline]
-    E->>R: Encrypt(RelayKey, "CONNECT\n<TargetAddr>\n")
-    R->>X: Decrypt(RelayKey) → Forwards "CONNECT\n<TargetAddr>\n"
+    E->>R: Encrypt(RelayKey, "CONNECT\n") — no destination
+    R->>X: Decrypt(RelayKey) → Forwards "CONNECT\n"
     E->>R: Encrypt(RelayKey, X25519 Public Key [32 bytes])
     R->>X: Decrypt(RelayKey) → Forwards X25519 Public Key
     X->>R: X25519 Public Key (32 bytes) [Responder]
     R->>E: Encrypt(RelayKey, X25519 Public Key)
     Note over E,X: Both derive shared secret: ExitKey (via HKDF-SHA256)
+    E->>R: Encrypt(RelayKey, Encrypt(ExitKey, TargetRecord [512 bytes, padded]))
+    R->>X: Decrypt(RelayKey) → Forwards ExitKey-encrypted TargetRecord
+    Note over R: Relay never sees the destination or its length
 
     Note over E,X: Clear Handshake Deadlines → Enter Streaming Mode
     Note over E,I: Phase 4 — Double-Encrypted Onion Data Tunnel (>1.15 GB/s Throughput)
@@ -109,8 +112,8 @@ sequenceDiagram
 ```mermaid
 graph LR
     subgraph "DHT Rendezvous Namespace"
-        RelayRendezvous["'shadowlink-relay'"]
-        ExitRendezvous["'shadowlink-exit'"]
+        RelayRendezvous["'shadowlink-v2-relay'"]
+        ExitRendezvous["'shadowlink-v2-exit'"]
     end
 
     Relay1["Relay Peer 1"] -->|Advertise| RelayRendezvous

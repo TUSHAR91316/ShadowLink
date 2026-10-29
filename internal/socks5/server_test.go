@@ -123,7 +123,6 @@ func TestServer_AddrAndPortInspection(t *testing.T) {
 	<-errCh
 }
 
-
 // TestServer_NoLocalDNSResolution verifies that hostname requests reach the dialer
 // unresolved, so DNS lookups happen at the exit node instead of leaking locally.
 func TestServer_NoLocalDNSResolution(t *testing.T) {

@@ -6,27 +6,6 @@ import 'package:flutter/material.dart';
 import '../services/daemon_service.dart';
 import '../theme/app_theme.dart';
 
-/// Represents a dVPN node in the decentralized mesh network.
-class DVPNNode {
-  final String city;
-  final String country;
-  final String flag;
-  final String code;
-  final String ip;
-  final int pingMs;
-  final double load;
-
-  const DVPNNode({
-    required this.city,
-    required this.country,
-    required this.flag,
-    required this.code,
-    required this.ip,
-    required this.pingMs,
-    required this.load,
-  });
-}
-
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -42,69 +21,20 @@ class _DashboardScreenState extends State<DashboardScreen>
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
 
-  // ─── Live Telemetry Simulation State ────────────────────────────────────────
+  // ─── Session State ─────────────────────────────────────────────────────────
   Timer? _tickerTimer;
-  int _sessionSeconds = 8078; // 02:14:38 initial sample uptime
-  bool _killSwitchActive = true;
-  bool _dnsLeakProtected = true;
-
-  // Available exit nodes for server selector modal
-  final List<DVPNNode> _availableNodes = const [
-    DVPNNode(
-      city: 'Zurich',
-      country: 'Switzerland',
-      flag: '🇨🇭',
-      code: 'CH-09',
-      ip: '185.220.101.42',
-      pingMs: 14,
-      load: 0.32,
-    ),
-    DVPNNode(
-      city: 'Frankfurt',
-      country: 'Germany',
-      flag: '🇩🇪',
-      code: 'DE-04',
-      ip: '194.36.144.18',
-      pingMs: 18,
-      load: 0.48,
-    ),
-    DVPNNode(
-      city: 'Reykjavik',
-      country: 'Iceland',
-      flag: '🇮🇸',
-      code: 'IS-02',
-      ip: '185.112.82.11',
-      pingMs: 28,
-      load: 0.22,
-    ),
-    DVPNNode(
-      city: 'Amsterdam',
-      country: 'Netherlands',
-      flag: '🇳🇱',
-      code: 'NL-15',
-      ip: '198.51.100.77',
-      pingMs: 21,
-      load: 0.65,
-    ),
-    DVPNNode(
-      city: 'Tokyo',
-      country: 'Japan',
-      flag: '🇯🇵',
-      code: 'JP-08',
-      ip: '203.0.113.194',
-      pingMs: 110,
-      load: 0.41,
-    ),
-  ];
-
-  late DVPNNode _selectedNode;
+  // Seconds connected in the current session. A notifier (not setState) so the
+  // 1 Hz tick only rebuilds the uptime label instead of the whole dashboard.
+  final ValueNotifier<int> _sessionSeconds = ValueNotifier(0);
+  DaemonStatus _lastStatus = DaemonStatus.disconnected;
   int _bottomNavIndex = 0;
+
+  String get _readyLabel =>
+      _daemon.isEntry ? 'SOCKS5 PROXY READY' : 'NODE READY';
 
   @override
   void initState() {
     super.initState();
-    _selectedNode = _availableNodes[0];
-
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
@@ -115,23 +45,35 @@ class _DashboardScreenState extends State<DashboardScreen>
       curve: Curves.easeInOut,
     );
 
+    _lastStatus = _daemon.statusNotifier.value;
+    _daemon.statusNotifier.addListener(_onStatusChanged);
     _startUptimeTicker();
   }
 
   @override
   void dispose() {
+    _daemon.statusNotifier.removeListener(_onStatusChanged);
     _pulseController.dispose();
     _tickerTimer?.cancel();
+    _sessionSeconds.dispose();
     super.dispose();
+  }
+
+  /// Restarts the session clock each time a new connection is established.
+  void _onStatusChanged() {
+    final status = _daemon.statusNotifier.value;
+    if (status == DaemonStatus.connected &&
+        _lastStatus != DaemonStatus.connected) {
+      _sessionSeconds.value = 0;
+    }
+    _lastStatus = status;
   }
 
   void _startUptimeTicker() {
     _tickerTimer?.cancel();
     _tickerTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && _daemon.statusNotifier.value == DaemonStatus.connected) {
-        setState(() {
-          _sessionSeconds++;
-        });
+      if (_daemon.statusNotifier.value == DaemonStatus.connected) {
+        _sessionSeconds.value++;
       }
     });
   }
@@ -149,8 +91,15 @@ class _DashboardScreenState extends State<DashboardScreen>
     setState(() => _daemon.isEntry = val);
   }
 
-  void _setRelay(bool val) => setState(() => _daemon.isRelay = val);
-  void _setExit(bool val) => setState(() => _daemon.isExit = val);
+  void _setRelay(bool val) {
+    if (!val && !_daemon.isEntry && !_daemon.isExit) return;
+    setState(() => _daemon.isRelay = val);
+  }
+
+  void _setExit(bool val) {
+    if (!val && !_daemon.isEntry && !_daemon.isRelay) return;
+    setState(() => _daemon.isExit = val);
+  }
 
   // ─── Connect / Disconnect Action ───────────────────────────────────────────
   Future<void> _handleConnectToggle(bool isConnected, bool isConnecting) async {
@@ -161,7 +110,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
-  // ─── Server Selector Modal ─────────────────────────────────────────────────
+  // ─── Route Information ──────────────────────────────────────────────────────
   void _showServerSelector(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -181,7 +130,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 children: [
                   const Expanded(
                     child: Text(
-                      'Select Exit Egress Node',
+                      'Automatic Exit Selection',
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
@@ -196,83 +145,12 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ],
               ),
               const SizedBox(height: 12),
-              Flexible(
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: _availableNodes.length,
-                  separatorBuilder: (_, __) => const Divider(),
-                  itemBuilder: (_, index) {
-                    final node = _availableNodes[index];
-                    final isSelected = node.code == _selectedNode.code;
-                    return Material(
-                      color: Colors.transparent,
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                        leading: Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: AppTheme.surfaceHigh,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: isSelected
-                                  ? AppTheme.primary
-                                  : AppTheme.borderSubtle,
-                            ),
-                          ),
-                          child: Center(
-                            child: Text(
-                              node.flag,
-                              style: const TextStyle(fontSize: 20),
-                            ),
-                          ),
-                        ),
-                        title: Text(
-                          '${node.city}, ${node.country}',
-                          style: TextStyle(
-                            color: isSelected
-                                ? AppTheme.primaryBright
-                                : AppTheme.textMain,
-                            fontWeight:
-                                isSelected ? FontWeight.bold : FontWeight.w500,
-                          ),
-                        ),
-                        subtitle: Text(
-                          '${node.code} · ${node.ip}',
-                          style: const TextStyle(
-                            color: AppTheme.textMuted,
-                            fontSize: 12,
-                          ),
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.signal_cellular_alt,
-                              size: 16,
-                              color: isSelected
-                                  ? AppTheme.primary
-                                  : AppTheme.textMuted,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${node.pingMs}ms',
-                              style: TextStyle(
-                                color: isSelected
-                                    ? AppTheme.primary
-                                    : AppTheme.textMuted,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                        onTap: () {
-                          setState(() => _selectedNode = node);
-                          Navigator.pop(ctx);
-                        },
-                      ),
-                    );
-                  },
+              const Text(
+                'The daemon discovers exit peers through the DHT and selects one when each connection is built. Geographic selection, node locations, and live latency are not available yet.',
+                style: TextStyle(
+                  color: AppTheme.textMuted,
+                  fontSize: 13,
+                  height: 1.5,
                 ),
               ),
             ],
@@ -297,8 +175,7 @@ class _DashboardScreenState extends State<DashboardScreen>
           body: LayoutBuilder(
             builder: (context, constraints) {
               if (constraints.maxWidth > 850) {
-                return _buildDesktopLayout(
-                    isConnected, isConnecting, isError);
+                return _buildDesktopLayout(isConnected, isConnecting, isError);
               }
               return _buildMobileLayout(isConnected, isConnecting, isError);
             },
@@ -381,10 +258,12 @@ class _DashboardScreenState extends State<DashboardScreen>
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 6, vertical: 1),
                                   decoration: BoxDecoration(
-                                    color: AppTheme.secondary.withValues(alpha: 0.15),
+                                    color: AppTheme.secondary
+                                        .withValues(alpha: 0.15),
                                     borderRadius: BorderRadius.circular(4),
                                     border: Border.all(
-                                      color: AppTheme.secondary.withValues(alpha: 0.3),
+                                      color: AppTheme.secondary
+                                          .withValues(alpha: 0.3),
                                     ),
                                   ),
                                   child: const Text(
@@ -458,7 +337,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                                   const SizedBox(width: 6),
                                   Text(
                                     isConnected
-                                        ? 'PROTECTED'
+                                        ? _readyLabel
                                         : isConnecting
                                             ? 'CONNECTING'
                                             : 'DISCONNECTED',
@@ -475,7 +354,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '${_selectedNode.city} ${_selectedNode.code}',
+                                'Exit selected per connection',
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
                                   fontWeight: FontWeight.bold,
@@ -523,7 +402,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                 // Desktop Navigation Menu
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     children: [
                       _buildNavItem(
                         icon: Icons.hub,
@@ -539,13 +419,13 @@ class _DashboardScreenState extends State<DashboardScreen>
                       ),
                       _buildNavItem(
                         icon: Icons.alt_route,
-                        title: 'Multi-Hop Circuit',
+                        title: 'Circuit Routing',
                         isSelected: false,
-                        badgeText: '3 Hops',
+                        badgeText: 'DHT',
                       ),
                       _buildNavItem(
                         icon: Icons.network_check,
-                        title: 'Live Telemetry',
+                        title: 'Session Metrics',
                         isSelected: false,
                       ),
                       _buildNavItem(
@@ -601,14 +481,14 @@ class _DashboardScreenState extends State<DashboardScreen>
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    'Sovereign Identity',
+                                    'Local peer identity',
                                     style: TextStyle(
                                       fontSize: 10,
                                       color: AppTheme.textMuted,
                                     ),
                                   ),
                                   Text(
-                                    '0x8f4c...4e19',
+                                    'Managed by libp2p',
                                     style: TextStyle(
                                       fontSize: 11,
                                       fontFamily: 'monospace',
@@ -634,9 +514,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                           color: AppTheme.surfaceContainer,
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                            color: _killSwitchActive
-                                ? AppTheme.primary.withValues(alpha: 0.4)
-                                : AppTheme.borderSubtle,
+                            color: AppTheme.borderSubtle,
                           ),
                         ),
                         child: Row(
@@ -647,9 +525,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                                 Icon(
                                   Icons.lock,
                                   size: 14,
-                                  color: _killSwitchActive
-                                      ? AppTheme.primary
-                                      : AppTheme.textMuted,
+                                  color: AppTheme.textMuted,
                                 ),
                                 const SizedBox(width: 6),
                                 const Text(
@@ -663,13 +539,11 @@ class _DashboardScreenState extends State<DashboardScreen>
                               ],
                             ),
                             Text(
-                              _killSwitchActive ? 'ACTIVE' : 'OFF',
-                              style: TextStyle(
+                              'N/A',
+                              style: const TextStyle(
                                 fontSize: 10,
                                 fontWeight: FontWeight.bold,
-                                color: _killSwitchActive
-                                    ? AppTheme.primary
-                                    : AppTheme.textMuted,
+                                color: AppTheme.textMuted,
                               ),
                             ),
                           ],
@@ -696,7 +570,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                 padding: const EdgeInsets.symmetric(horizontal: 24),
                 decoration: const BoxDecoration(
                   color: AppTheme.surface,
-                  border: Border(bottom: BorderSide(color: AppTheme.borderSubtle)),
+                  border:
+                      Border(bottom: BorderSide(color: AppTheme.borderSubtle)),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -738,7 +613,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                               const SizedBox(width: 8),
                               Text(
                                 isConnected
-                                    ? 'CONNECTED · SECURE'
+                                    ? _readyLabel
                                     : isConnecting
                                         ? 'NEGOTIATING ROUTE…'
                                         : 'NETWORK IDLE',
@@ -766,7 +641,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                             border: Border.all(color: AppTheme.borderSubtle),
                           ),
                           child: const Text(
-                            'IP: MASKED',
+                            'LOCAL SOCKS5',
                             style: TextStyle(
                               fontSize: 11,
                               color: AppTheme.secondary,
@@ -783,7 +658,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                         children: [
                           Flexible(
                             child: Text(
-                              'Virtual: ${_selectedNode.ip}',
+                              'Route: automatic DHT selection',
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 fontSize: 12,
@@ -793,7 +668,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                             ),
                           ),
                           const SizedBox(width: 6),
-                          Text(_selectedNode.flag),
                         ],
                       ),
                     ),
@@ -838,9 +712,11 @@ class _DashboardScreenState extends State<DashboardScreen>
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 14, vertical: 10),
                                 decoration: BoxDecoration(
-                                  color: AppTheme.surfaceLow.withValues(alpha: 0.85),
+                                  color: AppTheme.surfaceLow
+                                      .withValues(alpha: 0.85),
                                   borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: AppTheme.borderSubtle),
+                                  border:
+                                      Border.all(color: AppTheme.borderSubtle),
                                 ),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -852,7 +728,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                                     ),
                                     const SizedBox(width: 8),
                                     Text(
-                                      'Node: ${_selectedNode.city} (${_selectedNode.code})',
+                                      'Exit: automatic DHT selection',
                                       style: const TextStyle(
                                         fontSize: 12,
                                         color: AppTheme.textMain,
@@ -912,10 +788,10 @@ class _DashboardScreenState extends State<DashboardScreen>
                                               BoxShadow(
                                                 color: AppTheme.primary
                                                     .withValues(alpha: 0.35),
-                                                blurRadius: 36 *
-                                                    _pulseAnimation.value,
-                                                spreadRadius: 8 *
-                                                    _pulseAnimation.value,
+                                                blurRadius:
+                                                    36 * _pulseAnimation.value,
+                                                spreadRadius:
+                                                    8 * _pulseAnimation.value,
                                               )
                                             ]
                                           : null,
@@ -965,7 +841,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 8),
                               decoration: BoxDecoration(
-                                color: AppTheme.surfaceHigh.withValues(alpha: 0.9),
+                                color:
+                                    AppTheme.surfaceHigh.withValues(alpha: 0.9),
                                 borderRadius: BorderRadius.circular(20),
                                 border: Border.all(
                                   color: isConnected
@@ -975,8 +852,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                               ),
                               child: Text(
                                 isConnected
-                                    ? 'Exit Node: ${_selectedNode.city}, ${_selectedNode.country} (${_selectedNode.code})'
-                                    : 'Select a route and press connect',
+                                    ? 'Exit peer selected automatically from the DHT'
+                                    : 'Exit peers are selected automatically',
                                 style: const TextStyle(
                                   fontSize: 12,
                                   color: AppTheme.textMain,
@@ -996,7 +873,8 @@ class _DashboardScreenState extends State<DashboardScreen>
               Padding(
                 padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                   decoration: AppTheme.glassCard(radius: 16),
                   child: Wrap(
                     alignment: WrapAlignment.spaceBetween,
@@ -1021,8 +899,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                                     : Colors.transparent,
                               ),
                             ),
-                            onPressed: () => _handleConnectToggle(
-                                isConnected, isConnecting),
+                            onPressed: () =>
+                                _handleConnectToggle(isConnected, isConnecting),
                             icon: Icon(
                               Icons.power_settings_new,
                               size: 16,
@@ -1036,7 +914,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                           OutlinedButton.icon(
                             style: OutlinedButton.styleFrom(
                               foregroundColor: AppTheme.textMain,
-                              side: const BorderSide(color: AppTheme.borderSubtle),
+                              side: const BorderSide(
+                                  color: AppTheme.borderSubtle),
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 14),
                               shape: RoundedRectangleBorder(
@@ -1049,7 +928,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                               size: 16,
                               color: AppTheme.secondary,
                             ),
-                            label: const Text('Change Server Node'),
+                            label: const Text('Automatic Route Details'),
                           ),
                         ],
                       ),
@@ -1149,8 +1028,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   // ═════════════════════════════════════════════════════════════════════════════
   // MOBILE LAYOUT (Compact Portrait Proton/ExpressVPN Style)
   // ═════════════════════════════════════════════════════════════════════════════
-  Widget _buildMobileLayout(
-      bool isConnected, bool isConnecting, bool isError) {
+  Widget _buildMobileLayout(bool isConnected, bool isConnecting, bool isError) {
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
@@ -1212,8 +1090,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
                       color: AppTheme.surfaceHigh,
                       borderRadius: BorderRadius.circular(12),
@@ -1231,7 +1109,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          '${_selectedNode.pingMs}ms',
+                          'AUTO',
                           style: const TextStyle(
                             fontSize: 11,
                             color: AppTheme.textMuted,
@@ -1277,8 +1155,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     },
                   ),
                 GestureDetector(
-                  onTap: () =>
-                      _handleConnectToggle(isConnected, isConnecting),
+                  onTap: () => _handleConnectToggle(isConnected, isConnecting),
                   child: Container(
                     width: 160,
                     height: 160,
@@ -1366,9 +1243,9 @@ class _DashboardScreenState extends State<DashboardScreen>
               ),
               child: Text(
                 isConnected
-                    ? 'CONNECTED · SECURE'
+                    ? 'SOCKS5 PROXY READY'
                     : isConnecting
-                        ? 'CONNECTING TO ONION CIRCUIT…'
+                        ? 'STARTING LOCAL PROXY…'
                         : 'DISCONNECTED',
                 style: TextStyle(
                   color: isConnected
@@ -1408,7 +1285,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                           ),
                           child: Center(
                             child: Text(
-                              _selectedNode.flag,
+                              '🌐',
                               style: const TextStyle(fontSize: 20),
                             ),
                           ),
@@ -1419,7 +1296,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${_selectedNode.city}, ${_selectedNode.country}',
+                                'Automatic exit selection',
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
                                   fontWeight: FontWeight.bold,
@@ -1428,7 +1305,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                                 ),
                               ),
                               Text(
-                                '${_selectedNode.ip} · ${_selectedNode.pingMs}ms',
+                                'Peer chosen from DHT for each connection',
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
                                   fontSize: 11,
@@ -1448,7 +1325,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     style: TextButton.styleFrom(
                       foregroundColor: AppTheme.primary,
                     ),
-                    child: const Text('Switch ⇄'),
+                    child: const Text('Details'),
                   ),
                 ],
               ),
@@ -1502,7 +1379,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        'Multi-Hop Onion Route',
+                        'Circuit Routing',
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 13,
@@ -1542,7 +1419,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               _buildHopNode(
                 icon: Icons.smartphone,
                 label: 'Your Device',
-                sublabel: 'IP: Masked',
+                sublabel: 'Local proxy',
                 color: isConnected ? AppTheme.primary : AppTheme.textMuted,
               ),
               Expanded(
@@ -1556,7 +1433,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               _buildHopNode(
                 icon: Icons.dns,
                 label: 'Relay Node',
-                sublabel: 'Frankfurt DE',
+                sublabel: isConnected ? 'DHT relay' : 'Not connected',
                 color: isConnected ? AppTheme.secondary : AppTheme.textMuted,
               ),
               Expanded(
@@ -1570,7 +1447,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               _buildHopNode(
                 icon: Icons.vpn_lock,
                 label: 'Exit Egress',
-                sublabel: '${_selectedNode.city} ${_selectedNode.code}',
+                sublabel: isConnected ? 'DHT exit' : 'Not connected',
                 color: isConnected ? AppTheme.primary : AppTheme.textMuted,
               ),
             ],
@@ -1583,14 +1460,16 @@ class _DashboardScreenState extends State<DashboardScreen>
             children: [
               const Expanded(
                 child: Text(
-                  'Zero-Knowledge Layered Tunnel',
+                  'Layered encrypted circuit',
                   style: TextStyle(fontSize: 10, color: AppTheme.textMuted),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               const SizedBox(width: 8),
-              const Text(
-                '3 Encrypted Hops Active',
+              Text(
+                isConnected
+                    ? 'Circuits created on demand'
+                    : 'No active circuit',
                 style: TextStyle(
                   fontSize: 10,
                   color: AppTheme.primary,
@@ -1657,8 +1536,8 @@ class _DashboardScreenState extends State<DashboardScreen>
               child: _buildTelemetryMetric(
                 icon: Icons.arrow_downward,
                 label: 'Download',
-                value: isConnected ? '84.2' : '0.0',
-                unit: 'Mbps',
+                value: '—',
+                unit: 'Not tracked',
                 color: AppTheme.secondary,
               ),
             ),
@@ -1667,8 +1546,8 @@ class _DashboardScreenState extends State<DashboardScreen>
               child: _buildTelemetryMetric(
                 icon: Icons.arrow_upward,
                 label: 'Upload',
-                value: isConnected ? '38.6' : '0.0',
-                unit: 'Mbps',
+                value: '—',
+                unit: 'Not tracked',
                 color: AppTheme.primary,
               ),
             ),
@@ -1678,21 +1557,24 @@ class _DashboardScreenState extends State<DashboardScreen>
         Row(
           children: [
             Expanded(
-              child: _buildTelemetryMetric(
-                icon: Icons.timer,
-                label: 'Session',
-                value: isConnected ? _formatUptime(_sessionSeconds) : '00:00:00',
-                unit: 'Live',
-                color: AppTheme.textMain,
+              child: ValueListenableBuilder<int>(
+                valueListenable: _sessionSeconds,
+                builder: (context, seconds, _) => _buildTelemetryMetric(
+                  icon: Icons.timer,
+                  label: 'Node uptime',
+                  value: isConnected ? _formatUptime(seconds) : '00:00:00',
+                  unit: 'Live',
+                  color: AppTheme.textMain,
+                ),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: _buildTelemetryMetric(
                 icon: Icons.data_usage,
-                label: 'Transferred',
-                value: isConnected ? '1.4' : '0.0',
-                unit: 'GB',
+                label: 'Traffic',
+                value: '—',
+                unit: 'Not tracked',
                 color: AppTheme.textMain,
               ),
             ),
@@ -1768,7 +1650,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'Active Cryptographic Defenses',
+            'Security Features',
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.bold,
@@ -1782,21 +1664,19 @@ class _DashboardScreenState extends State<DashboardScreen>
                 child: _buildDefenseBadge(
                   icon: Icons.verified_user,
                   title: 'Kill Switch',
-                  status: _killSwitchActive ? 'Active' : 'Off',
-                  color: _killSwitchActive ? AppTheme.primary : AppTheme.textMuted,
-                  onTap: () => setState(
-                      () => _killSwitchActive = !_killSwitchActive),
+                  status: 'Unavailable',
+                  color: AppTheme.textMuted,
+                  onTap: null,
                 ),
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: _buildDefenseBadge(
                   icon: Icons.lock,
-                  title: 'DNS Shield',
-                  status: _dnsLeakProtected ? 'Protected' : 'Off',
-                  color: _dnsLeakProtected ? AppTheme.secondary : AppTheme.textMuted,
-                  onTap: () => setState(
-                      () => _dnsLeakProtected = !_dnsLeakProtected),
+                  title: 'Remote DNS',
+                  status: 'At exit',
+                  color: AppTheme.secondary,
+                  onTap: null,
                 ),
               ),
               const SizedBox(width: 8),
@@ -1892,7 +1772,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
                 const SizedBox(width: 8),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: AppTheme.secondary.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
@@ -1967,7 +1848,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 style: TextStyle(fontSize: 13, color: AppTheme.textMain),
               ),
               subtitle: const Text(
-                'Routes your local traffic through onion circuit',
+                'Routes SOCKS5 traffic through an onion circuit',
                 style: TextStyle(fontSize: 11, color: AppTheme.textMuted),
               ),
               value: _daemon.isEntry,
@@ -2011,7 +1892,8 @@ class _DashboardScreenState extends State<DashboardScreen>
         color: Colors.transparent,
         child: ListTile(
           onTap: onTap,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           tileColor: isSelected ? AppTheme.surfaceHigh : Colors.transparent,
           leading: Icon(
             icon,
@@ -2028,7 +1910,8 @@ class _DashboardScreenState extends State<DashboardScreen>
           ),
           trailing: badgeText != null
               ? Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: AppTheme.secondary.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
@@ -2173,9 +2056,9 @@ class _CyberMapPainter extends CustomPainter {
       canvas.drawPath(path, linePaint);
 
       // Draw node beacons
-      _drawNodeBeacon(canvas, clientNode, AppTheme.secondary, 'Client (0ms)');
-      _drawNodeBeacon(canvas, relayNode, AppTheme.primary, 'Frankfurt DE (18ms)');
-      _drawNodeBeacon(canvas, exitNode, AppTheme.primary, 'Zurich CH (14ms)');
+      _drawNodeBeacon(canvas, clientNode, AppTheme.secondary, 'Client');
+      _drawNodeBeacon(canvas, relayNode, AppTheme.primary, 'Relay');
+      _drawNodeBeacon(canvas, exitNode, AppTheme.primary, 'Exit');
     }
   }
 

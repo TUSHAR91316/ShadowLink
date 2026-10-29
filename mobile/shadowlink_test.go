@@ -38,4 +38,3 @@ func TestStartStopEntryNode(t *testing.T) {
 
 	node.Stop()
 }
-

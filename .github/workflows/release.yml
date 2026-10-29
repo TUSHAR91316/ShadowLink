@@ -1,214 +1,244 @@
-name: Build and Release ShadowLink v2
+name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+    tags: ['v*']
+  workflow_dispatch: # Builds every artifact without publishing a release
 
-# ─── Shared version pins ────────────────────────────────────────────────────
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  GO_VERSION: '1.22'
-  FLUTTER_CHANNEL: 'stable'
+  FLUTTER_VERSION: '3.47.0'
   JAVA_VERSION: '17'
-  JAVA_DISTRIBUTION: 'zulu'
-  RUBY_VERSION: '3.0'
+  # gomobile's minimum Android API level for the generated AAR.
+  ANDROID_API: '21'
 
 jobs:
-  # ─── Go tests ─────────────────────────────────────────────────────────────
-  test-go:
-    name: Run Go Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+  # ─── Same gate as every PR: nothing ships unless CI is green ──────────────
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run Tests
-        run: go test ./... -count=1
-
-  # ─── Headless binaries ────────────────────────────────────────────────────
+  # ─── Headless daemon binaries ─────────────────────────────────────────────
   build-headless:
-    name: Build Go Headless Binaries
+    name: Daemon (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: ci
     runs-on: ubuntu-latest
-    needs: test-go
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Names match the dev-fallback paths in shadowlink_gui/lib/services/daemon_service.dart.
+          - { goos: windows, goarch: amd64, name: shadowlink-windows-x64.exe }
+          - { goos: windows, goarch: arm64, name: shadowlink-windows-arm64.exe }
+          - { goos: linux, goarch: amd64, name: shadowlink-linux-x64 }
+          - { goos: linux, goarch: arm64, name: shadowlink-linux-arm64 }
+          - { goos: darwin, goarch: amd64, name: shadowlink-macos-intel }
+          - { goos: darwin, goarch: arm64, name: shadowlink-macos-apple-silicon }
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      - name: Build Windows Headless
+      - name: Build
         env:
-          GOOS: windows
-          GOARCH: amd64
-        run: go build -o release/shadowlink-windows-x64.exe ./cmd/shadowlink
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.name }}" ./cmd/shadowlink
 
-      - name: Build macOS Headless (Intel)
-        env:
-          GOOS: darwin
-          GOARCH: amd64
-        run: go build -o release/shadowlink-macos-intel ./cmd/shadowlink
-
-      - name: Build macOS Headless (Apple Silicon)
-        env:
-          GOOS: darwin
-          GOARCH: arm64
-        run: go build -o release/shadowlink-macos-apple-silicon ./cmd/shadowlink
-
-      - name: Build Linux Headless
-        env:
-          GOOS: linux
-          GOARCH: amd64
-        run: go build -o release/shadowlink-linux-x64 ./cmd/shadowlink
-
-      - name: Upload Headless Artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: headless-binaries
-          path: release/shadowlink-*
+          name: daemon-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/${{ matrix.name }}
+          if-no-files-found: error
 
-  # ─── Windows GUI ──────────────────────────────────────────────────────────
+  # ─── Windows desktop GUI (daemon bundled next to the executable) ──────────
   build-gui-windows:
-    name: Build Flutter GUI (Windows)
+    name: GUI (Windows)
+    needs: ci
     runs-on: windows-latest
-    needs: test-go
+    timeout-minutes: 30
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: actions/setup-go@v6
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          go-version-file: go.mod
 
-      - name: Install dependencies
-        working-directory: ./shadowlink_gui
-        run: flutter pub get
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
 
-      - name: Build Windows App
-        working-directory: ./shadowlink_gui
-        run: flutter build windows --release
-
-      - name: Package Windows GUI
+      - name: Build Flutter app
+        working-directory: shadowlink_gui
         run: |
-          Compress-Archive -Path shadowlink_gui/build/windows/x64/runner/Release/* -DestinationPath release/shadowlink-gui-windows-x64.zip
+          flutter pub get
+          flutter build windows --release
 
-      - name: Upload GUI Artifact
-        uses: actions/upload-artifact@v4
+      # DaemonService looks for shadowlink.exe beside the GUI executable first.
+      - name: Bundle daemon
+        env:
+          CGO_ENABLED: '0'
+        run: go build -trimpath -ldflags="-s -w" -o shadowlink_gui/build/windows/x64/runner/Release/shadowlink.exe ./cmd/shadowlink
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path shadowlink_gui/build/windows/x64/runner/Release/* -DestinationPath dist/shadowlink-gui-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
         with:
           name: gui-windows
-          path: release/shadowlink-gui-windows-x64.zip
+          path: dist/shadowlink-gui-windows-x64.zip
+          if-no-files-found: error
 
-  # ─── Android APK ──────────────────────────────────────────────────────────
-  build-gui-android:
-    name: Build Flutter GUI (Android)
+  # ─── Linux desktop GUI (daemon bundled next to the executable) ────────────
+  build-gui-linux:
+    name: GUI (Linux)
+    needs: ci
     runs-on: ubuntu-latest
-    needs: test-go
+    timeout-minutes: 30
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Setup Java
-        uses: actions/setup-java@v3
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev
+
+      - uses: actions/setup-go@v6
         with:
-          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          go-version-file: go.mod
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Build Flutter app
+        working-directory: shadowlink_gui
+        run: |
+          flutter pub get
+          flutter build linux --release
+
+      - name: Bundle daemon
+        env:
+          CGO_ENABLED: '0'
+        run: go build -trimpath -ldflags="-s -w" -o shadowlink_gui/build/linux/x64/release/bundle/shadowlink ./cmd/shadowlink
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C shadowlink_gui/build/linux/x64/release/bundle -czf dist/shadowlink-gui-linux-x64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux
+          path: dist/shadowlink-gui-linux-x64.tar.gz
+          if-no-files-found: error
+
+  # ─── Android APK (Go engine embedded via gomobile) ────────────────────────
+  build-gui-android:
+    name: GUI (Android)
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-
-
+      # Installed from inside the module so the versions pinned in go.mod are used.
       - name: Install gomobile
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
+          go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> "$GITHUB_ENV"
 
-      - name: Build Android AAR (gomobile)
+      - name: Build Android AAR
         run: |
+          gomobile init
           mkdir -p shadowlink_gui/android/app/libs
-          gomobile bind -v -target=android -androidapi 21 -o shadowlink_gui/android/app/libs/mobile.aar ./mobile
+          gomobile bind -v -target=android -androidapi "${ANDROID_API}" -o shadowlink_gui/android/app/libs/mobile.aar ./mobile
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
 
-      - name: Install dependencies
-        working-directory: ./shadowlink_gui
-        run: flutter pub get
-
-      - name: Build Android APK
-        working-directory: ./shadowlink_gui
-        run: flutter build apk --release
+      - name: Build APK
+        working-directory: shadowlink_gui
+        run: |
+          flutter pub get
+          flutter build apk --release
 
       - name: Stage APK
         run: |
-          mkdir -p release
-          cp shadowlink_gui/build/app/outputs/flutter-apk/app-release.apk release/shadowlink-android.apk
+          mkdir -p dist
+          cp shadowlink_gui/build/app/outputs/flutter-apk/app-release.apk dist/shadowlink-android.apk
 
-      - name: Upload Android Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: gui-android
-          path: release/shadowlink-android.apk
+          path: dist/shadowlink-android.apk
+          if-no-files-found: error
 
-  # ─── iOS IPA ──────────────────────────────────────────────────────────────
+  # ─── iOS app (unsigned; Go engine embedded via gomobile) ──────────────────
   build-gui-ios:
-    name: Build Flutter GUI (iOS)
+    name: GUI (iOS, unsigned)
+    needs: ci
     runs-on: macos-latest
-    needs: test-go
+    timeout-minutes: 45
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Install gomobile
-        run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
+        run: go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
 
-      - name: Build iOS XCFramework (gomobile)
+      - name: Build iOS XCFramework
         run: |
+          gomobile init
           gomobile bind -v -target=ios,iossimulator -o shadowlink_gui/ios/Mobile.xcframework ./mobile
 
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ env.RUBY_VERSION }}
-          bundler-cache: true
+          ruby-version: '3.3'
 
-      - name: Embed XCFramework in Xcode Project
+      - name: Embed XCFramework in Xcode project
         run: |
-          gem install xcodeproj
+          gem install xcodeproj --no-document
           ruby -e "
           require 'xcodeproj'
-          project_path = 'shadowlink_gui/ios/Runner.xcodeproj'
-          project = Xcodeproj::Project.open(project_path)
+          project = Xcodeproj::Project.open('shadowlink_gui/ios/Runner.xcodeproj')
           target = project.targets.first
           framework_group = project.main_group.find_subpath('Frameworks', true)
           file_ref = framework_group.new_reference('Mobile.xcframework')
-
-          # Add to Frameworks Build Phase
           target.frameworks_build_phase.add_file_reference(file_ref, true)
 
-          # Add to Embed Frameworks Build Phase
           embed_phase = target.build_phases.find { |p|
             p.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && p.name == 'Embed Frameworks'
           }
@@ -220,59 +250,58 @@ jobs:
           end
           build_file = embed_phase.add_file_reference(file_ref, true)
           build_file.settings = { 'ATTRIBUTES' => ['CodeSignOnCopy', 'RemoveHeadersOnCopy'] }
-
           project.save
           "
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
 
-      - name: Install dependencies
-        working-directory: ./shadowlink_gui
-        run: flutter pub get
-
-      - name: Build iOS App (no codesign)
-        working-directory: ./shadowlink_gui
-        run: flutter build ios --release --no-codesign
-
-      - name: Package iOS IPA
+      - name: Build iOS app (no codesign)
+        working-directory: shadowlink_gui
         run: |
-          mkdir -p release
-          cd shadowlink_gui/build/ios/iphoneos
-          mkdir -p Payload
-          mv Runner.app Payload/
-          zip -r ../../../../release/shadowlink-ios.ipa Payload
+          flutter pub get
+          flutter build ios --release --no-codesign
 
-      - name: Upload iOS Artifact
-        uses: actions/upload-artifact@v4
+      - name: Package IPA
+        run: |
+          mkdir -p dist Payload
+          cp -R shadowlink_gui/build/ios/iphoneos/Runner.app Payload/
+          zip -qr dist/shadowlink-ios-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
         with:
           name: gui-ios
-          path: release/shadowlink-ios.ipa
+          path: dist/shadowlink-ios-unsigned.ipa
+          if-no-files-found: error
 
-  # ─── GitHub Release ───────────────────────────────────────────────────────
-  create-release:
-    name: Create GitHub Release
-    needs: [build-headless, build-gui-windows, build-gui-android, build-gui-ios]
+  # ─── Publish GitHub Release (tag pushes only) ─────────────────────────────
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-headless, build-gui-windows, build-gui-linux, build-gui-android, build-gui-ios]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
+          path: dist
           merge-multiple: true
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@v2
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
         with:
-          files: ./artifacts/*
-          draft: false
-          prerelease: false
+          files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          # Tags like v2.1.0-beta.1 are published as pre-releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}

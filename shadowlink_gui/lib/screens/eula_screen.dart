@@ -2,10 +2,9 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
 import '../config/app_config.dart';
+import '../services/daemon_service.dart';
 import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
 
@@ -38,8 +37,7 @@ class _EulaScreenState extends State<EulaScreen> {
       if (mounted) setState(() => _eulaText = text);
     } catch (_) {
       if (mounted) {
-        setState(() => _eulaText =
-            'SHADOWLINK ZERO-KNOWLEDGE PROTOCOL TERMS:\n\n'
+        setState(() => _eulaText = 'SHADOWLINK ZERO-KNOWLEDGE PROTOCOL TERMS:\n\n'
             '1. NO CENTRAL LOGS: ShadowLink operates exclusively via peer-to-peer\n'
             '   cryptographic onion circuits. No telemetry or connection logs exist.\n\n'
             '2. OPERATOR RESPONSIBILITY: Running an exit node routes traffic from other peers\n'
@@ -52,7 +50,7 @@ class _EulaScreenState extends State<EulaScreen> {
 
   /// Skips the EULA screen if the user accepted in a prior session.
   Future<void> _checkExistingEula() async {
-    final eulaPath = await _getEulaPath();
+    final eulaPath = await DaemonService.eulaFilePath();
     if (await File(eulaPath).exists()) {
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
@@ -62,22 +60,17 @@ class _EulaScreenState extends State<EulaScreen> {
   }
 
   Future<void> _acceptEula() async {
-    final eulaPath = await _getEulaPath();
-    await File(eulaPath).writeAsString('accepted');
+    try {
+      final eulaPath = await DaemonService.eulaFilePath();
+      await File(eulaPath).writeAsString('accepted');
+    } on FileSystemException {
+      // Persisting is best-effort: the user accepted, so let them continue;
+      // they will simply be asked again on the next launch.
+    }
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const DashboardScreen()),
     );
-  }
-
-  /// Returns a writable path for the EULA acceptance file.
-  Future<String> _getEulaPath() async {
-    if (Platform.isAndroid || Platform.isIOS) {
-      final dir = await getApplicationDocumentsDirectory();
-      return p.join(dir.path, kEulaFileName);
-    }
-    final execDir = File(Platform.resolvedExecutable).parent.path;
-    return p.join(execDir, kEulaFileName);
   }
 
   @override
@@ -215,7 +208,8 @@ class _EulaScreenState extends State<EulaScreen> {
                             value: _accepted,
                             activeColor: AppTheme.primary,
                             checkColor: const Color(0xFF003824),
-                            side: const BorderSide(color: AppTheme.borderSubtle),
+                            side:
+                                const BorderSide(color: AppTheme.borderSubtle),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(4),
                             ),
@@ -246,9 +240,8 @@ class _EulaScreenState extends State<EulaScreen> {
                     child: ElevatedButton(
                       onPressed: _accepted ? _acceptEula : null,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: _accepted
-                            ? AppTheme.primary
-                            : AppTheme.surfaceHigh,
+                        backgroundColor:
+                            _accepted ? AppTheme.primary : AppTheme.surfaceHigh,
                         foregroundColor: _accepted
                             ? const Color(0xFF003824)
                             : AppTheme.textMuted,

@@ -1,55 +1,172 @@
-name: ShadowLink CI & Security Scan
+name: CI
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [main]
   pull_request:
-    branches: [ "master" ]
+    branches: [main]
+  workflow_dispatch:
+  # Lets release.yml run the exact same gate before building anything.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Distinct from release.yml's group so a release calling this workflow never cancels itself.
+  group: ci-${{ github.ref }}
+  # Supersede outdated PR runs, but let every push to main finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FLUTTER_VERSION: '3.47.0'
+  GOSEC_VERSION: v2.30.0
+  GOVULNCHECK_VERSION: v1.9.0
+  ACTIONLINT_VERSION: v1.7.12
 
 jobs:
-  build-and-test:
-    name: Build & Test
+  # ─── Go: formatting, modules, vet, cross-compilation ──────────────────────
+  go-checks:
+    name: Go checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.21'
+          go-version-file: go.mod # honours the toolchain directive
 
-      - name: Check Formatting
-        run: if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then echo "Code is not formatted properly. Run 'go fmt ./...'"; exit 1; fi
-        
-      - name: Go Vet
-        run: go vet ./...
+      - name: Check go.mod / go.sum are tidy
+        run: go mod tidy -diff
 
-      - name: Build
-        run: go build -v ./...
+      - name: Verify module checksums
+        run: go mod verify
 
-      - name: Test
-        run: go test -v -race ./...
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -s -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need 'gofmt -s -w':"
+            echo "$unformatted"
+            exit 1
+          fi
 
-  security-scan:
-    name: Code Security & Vulnerability Scan
+      # sysproxy has per-OS implementations, so vet and build every target.
+      - name: Vet (all target OSes)
+        run: |
+          for os in linux windows darwin; do
+            echo "::group::go vet GOOS=$os"
+            GOOS=$os go vet ./...
+            echo "::endgroup::"
+          done
+
+      - name: Cross-compile daemon
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            echo "Building $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -trimpath -o /dev/null ./cmd/shadowlink
+          done
+
+  # ─── Go: tests on every desktop OS ────────────────────────────────────────
+  go-test:
+    name: Go tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test with race detector
+        shell: bash
+        run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage summary
+        if: matrix.os == 'ubuntu-latest'
+        run: go tool cover -func=coverage.out | tail -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+          retention-days: 14
+
+  # ─── Go: static security analysis and known-vulnerability scan ────────────
+  security:
+    name: Security scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Run Gosec Security Scanner
-        uses: securego/gosec@master
+      - uses: actions/setup-go@v6
         with:
-          args: ./...
+          go-version-file: go.mod
 
-      - name: Setup Go for Govulncheck
-        uses: actions/setup-go@v5
+      - name: gosec
+        run: |
+          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          gosec -quiet ./...
+
+      - name: govulncheck
+        run: |
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          # Human-readable report for the log (informational; the gate below decides).
+          govulncheck ./... || true
+          # Fail only on reachable vulnerabilities that have a fix to upgrade to.
+          govulncheck -format json ./... | python3 .github/scripts/govulncheck_gate.py
+
+  # ─── Flutter GUI: format, analyze, widget tests ───────────────────────────
+  flutter:
+    name: Flutter GUI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: shadowlink_gui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
         with:
-          go-version: '1.21'
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
 
-      - name: Install Govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Install dependencies
+        run: flutter pub get
 
-      - name: Run Govulncheck (Dependency vulnerabilities)
-        run: govulncheck ./...
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Widget tests
+        run: flutter test
+
+  # ─── Workflow files themselves ────────────────────────────────────────────
+  actionlint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: actionlint
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"

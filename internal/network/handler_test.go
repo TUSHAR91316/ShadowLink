@@ -80,7 +80,6 @@ func TestReadLineRaw_ExceedsMaxLineLen(t *testing.T) {
 	}
 }
 
-
 // TestRoleAllows verifies each role only serves the commands it opted into —
 // in particular that a relay-only node never acts as an exit.
 func TestRoleAllows(t *testing.T) {
@@ -110,6 +109,9 @@ func TestExitDialControl(t *testing.T) {
 		"127.0.0.1:80", "[::1]:80", "10.1.2.3:22", "192.168.1.1:80", "172.16.0.5:443",
 		"169.254.169.254:80", "[fe80::1]:80", "[fc00::1]:80", "0.0.0.0:80",
 		"100.64.0.1:80", "255.255.255.255:80", "224.0.0.1:80", "[::ffff:127.0.0.1]:80",
+		"192.0.2.1:80", "198.51.100.4:80", "203.0.113.10:80", "198.19.0.1:80",
+		"[2001:db8::1]:443", "[2002:7f00:1::]:443", "[3fff::1]:443",
+		"[64:ff9b::7f00:1]:80", "[64:ff9b:1::7f00:1]:80",
 	}
 	for _, addr := range blocked {
 		if err := exitDialControl("tcp", addr, nil); err == nil {

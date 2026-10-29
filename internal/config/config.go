@@ -8,19 +8,30 @@ import "time"
 
 // ProtocolID is the libp2p stream protocol identifier for ShadowLink.
 // Changing this is a breaking protocol change — all nodes must agree on the same value.
-const ProtocolID = "/shadowlink/1.0.0"
+//
+// v2 moved the exit target out of the plaintext CONNECT header and into an
+// exit-key-encrypted record, so relays can no longer read circuit destinations.
+const ProtocolID = "/shadowlink/2.0.0"
 
 // ExtendHeader is the sentinel string written to a relay node, followed by the target exit node PeerID.
 const ExtendHeader = "EXTEND"
 
-// ConnectHeader is the sentinel string written to an exit node, followed by the target internet address.
+// ConnectHeader is the sentinel line that opens an exit session. It carries no
+// destination: the target address follows the ECDH handshake as a TargetRecordSize
+// record encrypted with the exit session key, so an intermediate relay never sees it.
 const ConnectHeader = "CONNECT"
 
+// TargetRecordSize is the fixed size of the encrypted exit-target record:
+// [2-byte BE length][address][zero padding]. A constant size keeps the relay from
+// inferring the destination hostname's length from the frame size.
+const TargetRecordSize = 512
+
 // RendezvousRelay is the DHT rendezvous key used by relay nodes to announce themselves.
-const RendezvousRelay = "shadowlink-relay"
+// Versioned with ProtocolID so v2 entries never select incompatible v1 nodes.
+const RendezvousRelay = "shadowlink-v2-relay"
 
 // RendezvousExit is the DHT rendezvous key used by exit nodes to announce themselves.
-const RendezvousExit = "shadowlink-exit"
+const RendezvousExit = "shadowlink-v2-exit"
 
 // ─── Node Roles ──────────────────────────────────────────────────────────────
 

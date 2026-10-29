@@ -55,13 +55,13 @@ func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *disc
 	firstLine, err := readLineRaw(s)
 	if err != nil {
 		log.Printf("Handler: failed to read first line from %s: %v", s.Conn().RemotePeer(), err)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 
 	if !roleAllows(role, firstLine) {
 		log.Printf("Handler: %q not permitted for local role %q — dropping stream from %s", firstLine, role, s.Conn().RemotePeer())
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 
@@ -71,24 +71,19 @@ func HandleStream(ctx context.Context, s libp2pnet.Stream, role string, ds *disc
 		targetPeerID, err := readLineRaw(s)
 		if err != nil {
 			log.Printf("Handler: failed to read target peer ID for EXTEND from %s: %v", s.Conn().RemotePeer(), err)
-			s.Reset() //nolint:errcheck
+			_ = s.Reset()
 			return
 		}
 		handleRelay(ctx, s, ds, targetPeerID)
 
 	case config.ConnectHeader:
 		// Exit mode: upstream (relay or direct entry) wants us to reach an internet host.
-		targetAddr, err := readLineRaw(s)
-		if err != nil {
-			log.Printf("Handler: failed to read target addr for CONNECT from %s: %v", s.Conn().RemotePeer(), err)
-			s.Reset() //nolint:errcheck
-			return
-		}
-		handleExit(ctx, s, targetAddr)
+		// The destination arrives encrypted after the handshake, inside handleExit.
+		handleExit(ctx, s)
 
 	default:
 		log.Printf("Handler: unknown protocol header %q from %s — dropping stream", firstLine, s.Conn().RemotePeer())
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 	}
 }
 
@@ -114,7 +109,7 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 	relayKey, err := crypto.RespondECDHWithInfo(rawReadWriter{s, s}, config.HKDFInfoRelay)
 	if err != nil {
 		log.Printf("Relay: ECDH with entry failed: %v", err)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 
@@ -122,7 +117,7 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 	exitID, err := peer.Decode(targetPeerID)
 	if err != nil {
 		log.Printf("Relay: invalid exit peer ID %q: %v", targetPeerID, err)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 
@@ -134,25 +129,25 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 		exitAddrInfo, err = ds.DHT.FindPeer(setupCtx, exitID)
 		if err != nil {
 			log.Printf("Relay: DHT lookup for exit %s failed: %v", exitID, err)
-			s.Reset() //nolint:errcheck
+			_ = s.Reset()
 			return
 		}
 	} else {
 		log.Printf("Relay: no peerstore addresses and DHT unavailable for exit %s", exitID)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 
 	if err := ds.Host.Connect(setupCtx, exitAddrInfo); err != nil {
 		log.Printf("Relay: connect to exit %s failed: %v", exitID, err)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 
 	exitStream, err := ds.Host.NewStream(setupCtx, exitID, config.ProtocolID)
 	if err != nil {
 		log.Printf("Relay: open stream to exit %s failed: %v", exitID, err)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
 		return
 	}
 	defer exitStream.Close()
@@ -171,22 +166,35 @@ func handleRelay(ctx context.Context, s libp2pnet.Stream, ds *discovery.Discover
 	bridge(upstreamConn, streamAdapter{exitStream})
 }
 
+// exitControl vets every address the exit dials. Tests swap it to reach loopback servers.
+var exitControl = exitDialControl
+
 // handleExit implements the exit node's internet egress.
 //
 // Flow:
 //  1. ECDH handshake with upstream (relay or direct entry) → sessionKey.
-//  2. Dial the target on the public internet using a context-aware dialer.
-//  3. Proxy bidirectionally: encrypted dVPN ↔ plaintext internet.
-func handleExit(ctx context.Context, s libp2pnet.Stream, targetAddr string) {
-	log.Printf("Exit: connecting to %s", targetAddr)
-
+//  2. Read the target record encrypted under sessionKey.
+//  3. Dial the target on the public internet using a context-aware dialer.
+//  4. Proxy bidirectionally: encrypted dVPN ↔ plaintext internet.
+//
+// Destinations are deliberately not logged, so exit operators keep no record
+// of where peers' traffic goes.
+func handleExit(ctx context.Context, s libp2pnet.Stream) {
 	_ = s.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	// Exit is always RESPONDER — reads the upstream peer's public key first.
 	sessionKey, err := crypto.RespondECDHWithInfo(rawReadWriter{s, s}, config.HKDFInfoExit)
 	if err != nil {
 		log.Printf("Exit: ECDH handshake failed: %v", err)
-		s.Reset() //nolint:errcheck
+		_ = s.Reset()
+		return
+	}
+
+	wrapper := newLibP2PConn(streamAdapter{s}, [][]byte{sessionKey})
+	targetAddr, err := readTargetRecord(wrapper)
+	if err != nil {
+		log.Printf("Exit: %v", err)
+		_ = s.Reset()
 		return
 	}
 
@@ -196,22 +204,29 @@ func handleExit(ctx context.Context, s libp2pnet.Stream, targetAddr string) {
 	// Use a context-aware dialer with connection timeout derived from parent ctx.
 	// Control refuses loopback/private/link-local targets so peers cannot use this
 	// exit to reach the operator's own machine or LAN (SSRF).
-	d := net.Dialer{Control: exitDialControl}
+	d := net.Dialer{Control: exitControl}
 	dialCtx, dialCancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer dialCancel()
 
 	outConn, err := d.DialContext(dialCtx, "tcp", targetAddr)
 	if err != nil {
-		log.Printf("Exit: failed to dial %s: %v", targetAddr, err)
-		s.Reset() //nolint:errcheck
+		log.Printf("Exit: failed to dial target: %v", redactTarget(err, targetAddr))
+		_ = s.Reset()
 		return
 	}
 	defer outConn.Close()
 
-	wrapper := newLibP2PConn(streamAdapter{s}, [][]byte{sessionKey})
-	log.Printf("Exit: circuit active — proxying to %s", targetAddr)
-
+	log.Printf("Exit: circuit active")
 	bridge(wrapper, outConn)
+}
+
+// redactTarget strips the destination from dial errors before they are logged.
+func redactTarget(err error, targetAddr string) string {
+	msg := err.Error()
+	if host, _, splitErr := net.SplitHostPort(targetAddr); splitErr == nil && host != "" {
+		msg = strings.ReplaceAll(msg, host, "<target>")
+	}
+	return strings.ReplaceAll(msg, targetAddr, "<target>")
 }
 
 // roleAllows reports whether a node running under role may serve the given
@@ -228,13 +243,26 @@ func roleAllows(role, command string) bool {
 	}
 }
 
-// blockedExitPrefixes lists special-purpose IPv4 ranges that netip's helpers
-// do not classify as non-public but that an exit node must never dial.
+// blockedExitPrefixes lists special-purpose ranges that netip's IsGlobalUnicast
+// helper may still classify as globally unicast. Exit nodes must not route to
+// documentation, benchmarking, transition, or reserved address space.
 var blockedExitPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),     // "this network"
-	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT
-	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
-	netip.MustParsePrefix("240.0.0.0/4"),   // reserved + limited broadcast
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"
+	netip.MustParsePrefix("192.0.0.0/24"),    // protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // documentation (TEST-NET-1)
+	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast
+	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // documentation (TEST-NET-2)
+	netip.MustParsePrefix("203.0.113.0/24"),  // documentation (TEST-NET-3)
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved + limited broadcast
+	netip.MustParsePrefix("64:ff9b::/96"),    // well-known NAT64 embeds an IPv4 destination
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use IPv4/IPv6 translation
+	netip.MustParsePrefix("2001::/32"),       // Teredo embeds an IPv4 destination
+	netip.MustParsePrefix("2001:2::/48"),     // benchmarking
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation
+	netip.MustParsePrefix("2002::/16"),       // 6to4 embeds an IPv4 destination
+	netip.MustParsePrefix("3fff::/20"),       // documentation
 }
 
 // isPublicAddr reports whether ip is a globally routable unicast address.

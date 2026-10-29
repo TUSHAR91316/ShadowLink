@@ -431,9 +431,6 @@ func TestCryptoShuffle(t *testing.T) {
 	}
 }
 
-
-
-
 // TestFraming_WriteLargerThanMaxFrame verifies that a single Write larger than
 // config.MaxFrameSize is split into valid frames instead of producing a frame
 // the receiver rejects as a protocol violation.

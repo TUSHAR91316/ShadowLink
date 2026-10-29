@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -27,6 +28,8 @@ class DaemonService {
   // ─── State ──────────────────────────────────────────────────────────────────
   Process? _process;
   Timer? _connectionTimeout;
+  bool _sysProxyEnabled =
+      false; // Whether the running daemon was started with --sysproxy
   bool _mobileStarted = false; // Guards duplicate MethodChannel calls on mobile
 
   final ValueNotifier<DaemonStatus> statusNotifier =
@@ -116,10 +119,11 @@ class DaemonService {
     logNotifier.value = 'Starting ShadowLink Daemon…\n';
 
     _connectionTimeout?.cancel();
-    _connectionTimeout = Timer(kConnectionTimeout, () {
+    _connectionTimeout = Timer(kConnectionTimeout, () async {
       if (statusNotifier.value == DaemonStatus.connecting) {
-        logNotifier.value += '\nConnection timeout. Stopping daemon.';
-        _stopDesktopDaemon();
+        _appendLog('\nConnection timeout. Stopping daemon.');
+        await _stopDesktopDaemon();
+        statusNotifier.value = DaemonStatus.error;
       }
     });
 
@@ -130,45 +134,63 @@ class DaemonService {
       if (isExit) args.add('--exit');
 
       // Auto-configure system proxy on desktop platforms for entry nodes.
-      if (isEntry && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
-        args.add('--sysproxy');
-      }
+      _sysProxyEnabled = isEntry &&
+          (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+      if (_sysProxyEnabled) args.add('--sysproxy');
 
       // Explicitly pass --accept-eula so headless/daemon execution never hangs on stdin.
       args.add('--accept-eula');
 
       final binPath = _getBinaryPath();
 
-      // Write the EULA acceptance file so the CLI daemon does not hang on stdin.
+      // Best-effort: write the EULA acceptance file. --accept-eula already keeps
+      // the daemon from blocking on stdin, so an unwritable install directory
+      // (e.g. Program Files) must not stop the daemon from starting.
       // File name sourced from app_config.kEulaFileName — not hardcoded.
-      final eulaFile = File(await _getEulaPath());
-      if (!await eulaFile.exists()) {
-        await eulaFile.writeAsString('accepted');
+      try {
+        final eulaFile = File(await eulaFilePath());
+        if (!await eulaFile.exists()) {
+          await eulaFile.writeAsString('accepted');
+        }
+      } on FileSystemException catch (e) {
+        _appendLog(
+            'Note: could not write EULA file (${e.message}); continuing.\n');
       }
 
-      _process = await Process.start(binPath, args);
+      final process = await Process.start(binPath, args);
+      _process = process;
 
-      _process!.stdout.listen((data) {
-        final line = String.fromCharCodes(data);
-        _appendLog(line);
-        // Detect connection success from daemon stdout.
-        if (line.contains('Starting SOCKS5 proxy') ||
-            line.contains('SOCKS5 proxy listening') ||
-            line.contains('Announce') ||
-            line.contains('Announcing')) {
+      // Go's log package writes to stderr, so readiness markers must be detected
+      // on both streams. Decoding as UTF-8 lines keeps multi-byte characters and
+      // markers intact when they straddle chunk boundaries.
+      void onLine(String line) {
+        // Ignore output from a stale process.
+        if (!identical(_process, process)) return;
+        _appendLog('$line\n');
+        if (statusNotifier.value == DaemonStatus.connecting &&
+            _readyMarkers.any(line.contains)) {
           _connectionTimeout?.cancel();
           statusNotifier.value = DaemonStatus.connected;
         }
-      });
+      }
 
-      _process!.stderr.listen((data) {
-        _appendLog('ERROR: ${String.fromCharCodes(data)}');
-      });
+      process.stdout
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(onLine);
+      process.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(onLine);
 
-      _process!.exitCode.then((code) {
+      process.exitCode.then((code) {
+        // Ignore exits of a process that was already stopped or replaced; otherwise
+        // a quick stop/start would clear the handle of the newly started daemon.
+        if (!identical(_process, process)) return;
         _connectionTimeout?.cancel();
         _appendLog('\nDaemon exited with code $code');
-        statusNotifier.value = DaemonStatus.disconnected;
+        statusNotifier.value =
+            code == 0 ? DaemonStatus.disconnected : DaemonStatus.error;
         _process = null;
       });
     } catch (e) {
@@ -192,23 +214,32 @@ class DaemonService {
   }
 
   Future<void> _stopDesktopDaemon() async {
-    if (_process == null) return;
-    logNotifier.value += '\nStopping daemon…';
-    _process!.kill();
+    final process = _process;
+    if (process == null) return;
+    _appendLog('\nStopping daemon…');
     _process = null;
+    process.kill();
     statusNotifier.value = DaemonStatus.disconnected;
 
-    // Failsafe: Process.kill() is a hard SIGKILL and skips Go defers.
+    // Failsafe: on Windows Process.kill() terminates immediately and skips Go defers.
     // Explicitly invoke the --reset-proxy flag to restore internet connectivity.
-    if ((Platform.isWindows || Platform.isMacOS || Platform.isLinux) && isEntry) {
+    // Uses the flag captured at start, since the role toggles may have changed since.
+    if (_sysProxyEnabled) {
+      _sysProxyEnabled = false;
       try {
         await Process.run(_getBinaryPath(), ['--reset-proxy']);
-        logNotifier.value += '\nSystem proxy restored successfully.';
+        _appendLog('\nSystem proxy restored successfully.');
       } catch (e) {
-        logNotifier.value += '\nFailed to restore proxy: $e';
+        _appendLog('\nFailed to restore proxy: $e');
       }
     }
   }
+
+  /// Daemon log lines that signal the node is up and serving.
+  static const List<String> _readyMarkers = [
+    'SOCKS5 proxy listening', // Entry: local proxy bound
+    'ShadowLink node ready', // Relay / exit: stream handler registered
+  ];
 
   // ─── Path helpers (desktop-only) ─────────────────────────────────────────────
 
@@ -234,7 +265,8 @@ class DaemonService {
       bundledName = 'shadowlink';
       devName = 'shadowlink-linux-x64';
     } else {
-      throw UnsupportedError('Unsupported desktop platform: ${Platform.operatingSystem}');
+      throw UnsupportedError(
+          'Unsupported desktop platform: ${Platform.operatingSystem}');
     }
 
     // Production: binary is placed next to the Flutter executable by the installer.
@@ -257,14 +289,17 @@ class DaemonService {
   /// Returns a writable path for the EULA acceptance sentinel file.
   ///
   /// Uses [kEulaFileName] from app_config — not a hardcoded string.
-  /// On mobile, uses the app documents directory (Platform.resolvedExecutable
-  /// is not writable in a mobile sandbox).
-  Future<String> _getEulaPath() async {
+  /// On mobile, uses the app documents directory (the sandbox). On desktop, uses
+  /// the per-user application support directory: the folder next to the
+  /// executable is read-only for installed builds (e.g. Program Files).
+  static Future<String> eulaFilePath() async {
+    final Directory dir;
     if (Platform.isAndroid || Platform.isIOS) {
-      final dir = await getApplicationDocumentsDirectory();
-      return p.join(dir.path, kEulaFileName);
+      dir = await getApplicationDocumentsDirectory();
+    } else {
+      dir = await getApplicationSupportDirectory();
+      await dir.create(recursive: true);
     }
-    final execDir = File(Platform.resolvedExecutable).parent.path;
-    return p.join(execDir, kEulaFileName);
+    return p.join(dir.path, kEulaFileName);
   }
 }

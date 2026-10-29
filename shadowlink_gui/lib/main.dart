@@ -15,7 +15,8 @@ class ShadowLinkApp extends StatelessWidget {
       title: 'ShadowLink dVPN',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
-      home: const EulaScreen(), // Starts at EULA, routes to Dashboard if accepted
+      home:
+          const EulaScreen(), // Starts at EULA, routes to Dashboard if accepted
     );
   }
 }

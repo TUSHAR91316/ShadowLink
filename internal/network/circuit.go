@@ -69,7 +69,14 @@ func cryptoShuffle[T any](slice []T) {
 // ECDH session keys with both the Relay and the Exit node. The Relay never sees
 // plaintext — it only strips one layer of encryption before forwarding.
 func DialCircuit(ctx context.Context, ds *discovery.DiscoveryService, targetNetwork, targetAddr string) (net.Conn, error) {
-	log.Printf("DialCircuit: building circuit for %s", targetAddr)
+	// Do not log the destination: even local logs can reveal a user's browsing history.
+	log.Printf("DialCircuit: building circuit")
+
+	// Reject unencodable targets up front so they are not blamed on (and evicted
+	// from the cache as) failing exit nodes.
+	if err := validateTarget(targetAddr); err != nil {
+		return nil, err
+	}
 
 	// Bound the whole circuit build. The SOCKS5 server passes a context with no
 	// deadline, so without this a black-holed peer could stall a client forever.
@@ -174,9 +181,10 @@ func dialViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relays, e
 //  1. Connect to the relay and send "EXTEND\n<ExitPeerID>\n" in plaintext.
 //  2. ECDH with the relay (Entry = INITIATOR) → relayKey using HKDFInfoRelay.
 //  3. The relay connects to the exit and bridges the raw byte stream transparently.
-//  4. Entry sends "CONNECT\n<TargetAddr>\n" encrypted with relayKey through relayConn.
-//  5. ECDH with the exit through the relay → exitKey using HKDFInfoExit.
-//  6. Return a nested libP2PConn: inner is relayConn (relayKey), outer adds exitKey.
+//  4. openExitSession through relayConn: "CONNECT\n", ECDH with the exit → exitKey,
+//     then the target record encrypted with exitKey. The relay only ever sees the
+//     bare CONNECT line and exit-encrypted bytes — never the destination.
+//  5. Return a nested libP2PConn: inner is relayConn (relayKey), outer adds exitKey.
 func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exit peer.AddrInfo, targetAddr string) (net.Conn, error) {
 	if err := ds.Host.Connect(ctx, relay); err != nil {
 		return nil, &relayConnectError{err: fmt.Errorf("connect to relay: %w", err)}
@@ -193,7 +201,7 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 	success := false
 	defer func() {
 		if !success {
-			stream.Reset()
+			_ = stream.Reset()
 		}
 	}()
 
@@ -211,22 +219,16 @@ func tryViaRelay(ctx context.Context, ds *discovery.DiscoveryService, relay, exi
 	// relayConn: all traffic is encrypted with relayKey before hitting the wire.
 	relayConn := newLibP2PConn(streamAdapter{stream}, [][]byte{relayKey})
 
-	// Step 3: Send the CONNECT command encrypted through the relay tunnel.
-	if _, err := fmt.Fprintf(relayConn, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
-		return nil, &exitConnectError{err: fmt.Errorf("write CONNECT header: %w", err)}
-	}
-
-	// Step 4: ECDH with the exit, proxied transparently through the relay using HKDFInfoExit.
-	exitKey, err := crypto.PerformECDHWithInfo(relayConn, config.HKDFInfoExit)
+	// Steps 3-4: exit handshake proxied through the relay tunnel. The returned conn
+	// nests the exitKey layer on top of the relayKey layer.
+	exitConn, err := openExitSession(relayConn, targetAddr)
 	if err != nil {
-		return nil, &exitConnectError{err: fmt.Errorf("ECDH with exit: %w", err)}
+		return nil, &exitConnectError{err: err}
 	}
 
 	// Clear handshake deadline for normal streaming transfer.
 	_ = stream.SetDeadline(time.Time{})
 
-	// Step 5: Nested conn — outer exitKey wrap sits on top of inner relayKey wrap.
-	exitConn := newLibP2PConn(relayConn, [][]byte{exitKey})
 	success = true
 	return exitConn, nil
 }
@@ -269,24 +271,77 @@ func tryDirect(ctx context.Context, ds *discovery.DiscoveryService, exitNode pee
 	success := false
 	defer func() {
 		if !success {
-			stream.Reset()
+			_ = stream.Reset()
 		}
 	}()
 
-	if _, err := fmt.Fprintf(stream, "%s\n%s\n", config.ConnectHeader, targetAddr); err != nil {
-		return nil, fmt.Errorf("write CONNECT header: %w", err)
-	}
-
-	sessionKey, err := crypto.PerformECDHWithInfo(stream, config.HKDFInfoExit)
+	exitConn, err := openExitSession(streamAdapter{stream}, targetAddr)
 	if err != nil {
-		return nil, fmt.Errorf("ECDH with exit: %w", err)
+		return nil, err
 	}
 
 	// Clear handshake deadline
 	_ = stream.SetDeadline(time.Time{})
 
 	success = true
-	return newLibP2PConn(streamAdapter{stream}, [][]byte{sessionKey}), nil
+	return exitConn, nil
+}
+
+// openExitSession runs the entry side of the exit handshake over conn — the raw
+// stream for a direct circuit, or the relay-encrypted tunnel for a 3-hop circuit:
+//
+//  1. "CONNECT\n" (no destination).
+//  2. X25519 ECDH with the exit → exitKey using HKDFInfoExit.
+//  3. The fixed-size target record, encrypted with exitKey.
+//
+// Because the destination is only ever sent under the exit's key, a relay
+// bridging conn learns neither the target nor (thanks to padding) its length.
+func openExitSession(conn net.Conn, targetAddr string) (*libP2PConn, error) {
+	if _, err := fmt.Fprintf(conn, "%s\n", config.ConnectHeader); err != nil {
+		return nil, fmt.Errorf("write CONNECT header: %w", err)
+	}
+	exitKey, err := crypto.PerformECDHWithInfo(conn, config.HKDFInfoExit)
+	if err != nil {
+		return nil, fmt.Errorf("ECDH with exit: %w", err)
+	}
+	exitConn := newLibP2PConn(conn, [][]byte{exitKey})
+	if err := writeTargetRecord(exitConn, targetAddr); err != nil {
+		return nil, fmt.Errorf("send target to exit: %w", err)
+	}
+	return exitConn, nil
+}
+
+// validateTarget reports whether addr fits in a target record.
+func validateTarget(addr string) error {
+	if addr == "" || len(addr) > config.TargetRecordSize-2 {
+		return fmt.Errorf("invalid target address length %d (must be 1-%d bytes)", len(addr), config.TargetRecordSize-2)
+	}
+	return nil
+}
+
+// writeTargetRecord sends addr as one padded [2-byte BE length][addr][zeros] record.
+func writeTargetRecord(w io.Writer, addr string) error {
+	if err := validateTarget(addr); err != nil {
+		return err
+	}
+	var rec [config.TargetRecordSize]byte
+	binary.BigEndian.PutUint16(rec[:2], uint16(len(addr))) // #nosec G115 -- bounded by validateTarget
+	copy(rec[2:], addr)
+	_, err := w.Write(rec[:])
+	return err
+}
+
+// readTargetRecord reads and decodes a record produced by writeTargetRecord.
+func readTargetRecord(r io.Reader) (string, error) {
+	var rec [config.TargetRecordSize]byte
+	if _, err := io.ReadFull(r, rec[:]); err != nil {
+		return "", fmt.Errorf("read target record: %w", err)
+	}
+	n := int(binary.BigEndian.Uint16(rec[:2]))
+	if n == 0 || n > len(rec)-2 {
+		return "", fmt.Errorf("invalid target record length %d", n)
+	}
+	return string(rec[2 : 2+n]), nil
 }
 
 // ─── Stream / Conn Adapters ──────────────────────────────────────────────────
@@ -392,7 +447,7 @@ func (c *libP2PConn) Read(b []byte) (int, error) {
 	}
 
 	// Grow the reusable frameBuf only when the incoming frame is larger than any seen so far.
-	if uint32(cap(c.frameBuf)) < frameLen {
+	if cap(c.frameBuf) < int(frameLen) {
 		c.frameBuf = make([]byte, frameLen)
 	}
 	frame := c.frameBuf[:frameLen]
@@ -480,6 +535,7 @@ func (c *libP2PConn) writeFrame(p []byte) error {
 
 	frame := c.writeBuf[:4+len(ciphertext)]
 	// Write 4-byte big-endian length prefix directly into the frame header.
+	// #nosec G115 -- len(ciphertext) <= maxWriteChunk + layer overhead, far below MaxUint32.
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(ciphertext)))
 	if &ciphertext[0] != &frame[4] {
 		copy(frame[4:], ciphertext)

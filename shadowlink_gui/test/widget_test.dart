@@ -62,23 +62,23 @@ void main() {
     expect(find.text('ShadowLink dVPN'), findsOneWidget);
     expect(find.text('Decentralized Mesh'), findsOneWidget);
 
-    // Verify Mobile Virtual Location Card
-    expect(find.text('Zurich, Switzerland'), findsOneWidget);
-    expect(find.text('Switch ⇄'), findsOneWidget);
+    // The daemon selects exit peers from the DHT; the UI does not invent locations.
+    expect(find.text('Automatic exit selection'), findsOneWidget);
+    expect(find.text('Details'), findsOneWidget);
 
     // Verify Circuit & Defense Badges
-    expect(find.text('Multi-Hop Onion Route'), findsOneWidget);
+    expect(find.text('Circuit Routing'), findsWidgets);
     expect(find.text('ChaCha20-Poly1305'), findsWidgets);
 
     // Verify Telemetry Grid
     expect(find.text('Download'), findsOneWidget);
     expect(find.text('Upload'), findsOneWidget);
-    expect(find.text('Session'), findsOneWidget);
+    expect(find.text('Node uptime'), findsOneWidget);
 
     // Verify Mobile Bottom Navigation Items
     expect(find.text('Shield'), findsOneWidget);
     expect(find.text('Nodes'), findsOneWidget);
-    expect(find.text('Traffic'), findsOneWidget);
+    expect(find.text('Traffic'), findsNWidgets(2));
     expect(find.text('Settings'), findsOneWidget);
   });
 
@@ -100,20 +100,20 @@ void main() {
     // Verify Desktop Left Navigation Workstation branding
     expect(find.text('SHADOWLINK'), findsWidgets);
     expect(find.text('dVPN v2.0'), findsOneWidget);
-    expect(find.text('Sovereign Identity'), findsOneWidget);
-    expect(find.text('0x8f4c...4e19'), findsOneWidget);
+    expect(find.text('Local peer identity'), findsOneWidget);
+    expect(find.text('Managed by libp2p'), findsOneWidget);
 
     // Verify Central Cyber Map Stage
-    expect(find.text('Change Server Node'), findsOneWidget);
-    expect(find.text('Select a route and press connect'), findsOneWidget);
+    expect(find.text('Automatic Route Details'), findsOneWidget);
+    expect(find.text('Exit peers are selected automatically'), findsOneWidget);
 
     // Verify Right Inspector Panel
-    expect(find.text('Multi-Hop Onion Route'), findsOneWidget);
+    expect(find.text('Circuit Routing'), findsWidgets);
     expect(find.text('Download'), findsOneWidget);
     expect(find.text('Node Operator Controls'), findsOneWidget);
   });
 
-  testWidgets('Server selector bottom sheet opens and displays available nodes',
+  testWidgets('Route details explain automatic DHT peer selection',
       (WidgetTester tester) async {
     tester.view.physicalSize = const Size(400, 850);
     tester.view.devicePixelRatio = 1.0;
@@ -127,22 +127,15 @@ void main() {
     );
     await tester.pump();
 
-    // Tap on the virtual location card to trigger exit node selection
-    await tester.tap(find.text('Zurich, Switzerland'));
+    // Open the route details from the automatic route card.
+    await tester.tap(find.text('Automatic exit selection'));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
 
-    // Verify bottom sheet modal opened
-    expect(find.text('Select Exit Egress Node'), findsOneWidget);
-    expect(find.text('Frankfurt, Germany'), findsOneWidget);
-    expect(find.text('Reykjavik, Iceland'), findsOneWidget);
-
-    // Select Frankfurt node
-    await tester.tap(find.text('Frankfurt, Germany'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pump(const Duration(milliseconds: 300));
-
-    // Verify bottom sheet closed and Frankfurt is now selected
-    expect(find.text('Frankfurt, Germany'), findsOneWidget);
+    expect(find.text('Automatic Exit Selection'), findsOneWidget);
+    expect(
+      find.textContaining('selects one when each connection is built'),
+      findsOneWidget,
+    );
   });
 }

@@ -16,26 +16,27 @@
          │ Invokes custom dialer: dialer(ctx, "tcp", "example.com:443")
          ▼
 [ internal/network — DialCircuit() ]
-         │ 1. Checks peerCache (<1ms); on miss, queries Kad-DHT ("shadowlink-relay", "shadowlink-exit")
+         │ 1. Checks peerCache (<1ms); on miss, queries Kad-DHT ("shadowlink-v2-relay", "shadowlink-v2-exit")
          │ 2. Randomizes peer lists via cryptoShuffle() (crypto/rand.Int Fisher-Yates)
          │ 3. Selects (relayPeer, exitPeer) pair; sets 15s handshake deadline context
          │ 4. Calls tryViaRelay(ctx, ds, relayPeer, exitPeer, "example.com:443")
          │ 5. On dial/handshake failure, calls ds.InvalidatePeer(peerID) for immediate eviction
          ▼
 [ Handshake Phase: Entry ↔ Relay Hop (15s Deadline) ]
-         │ Entry dials relay via libp2p Host.NewStream(relayPeer, "/shadowlink/1.0.0")
+         │ Entry dials relay via libp2p Host.NewStream(relayPeer, "/shadowlink/2.0.0")
          │ Entry sends: "EXTEND\n<exitPeer.ID>\n"
          │ Entry & Relay perform X25519 ECDH → derives RelayKey via HKDF-SHA256
          │ Entry wraps stream into relayConn: libP2PConn{Conn: stream, AEADs: [relayAEAD]}
          ▼
 [ Handshake Phase: Entry ↔ Exit Hop (Tunneled Through Relay, 15s Deadline) ]
-         │ Relay resolves exitPeer via Kad-DHT/cache and dials NewStream(exitPeer, "/shadowlink/1.0.0")
+         │ Relay resolves exitPeer via Kad-DHT/cache and dials NewStream(exitPeer, "/shadowlink/2.0.0")
          │ Relay creates upstreamConn: libP2PConn{Conn: s, AEADs: [relayAEAD]}
          │ Relay calls bridge(upstreamConn, streamAdapter{exitStream}) using copyBufferPool (32 KiB sync.Pool)
-         │ Entry writes through relayConn: "CONNECT\nexample.com:443\n"
-         │ Relay decrypts outer RelayKey layer and passes raw "CONNECT\nexample.com:443\n" to Exit
+         │ Entry writes through relayConn: "CONNECT\n" (no destination)
          │ Entry & Exit perform X25519 ECDH through relay tunnel → derives ExitKey via HKDF-SHA256
          │ Entry wraps relayConn into exitConn: libP2PConn{Conn: relayConn, AEADs: [exitAEAD]}
+         │ Entry sends the 512-byte padded target record ("example.com:443") through exitConn,
+         │   so the relay only forwards ExitKey ciphertext and never learns the destination or its length
          │ Deadlines cleared on both streams (SetDeadline(time.Time{})) for streaming
          ▼
 [ Data Transfer Phase: Onion Encapsulation ]
@@ -69,11 +70,12 @@
 Defines protocol-wide constants to eliminate magic values:
 | Constant | Value | Purpose |
 |---|---|---|
-| `ProtocolID` | `"/shadowlink/1.0.0"` | libp2p stream protocol identifier |
+| `ProtocolID` | `"/shadowlink/2.0.0"` | libp2p stream protocol identifier |
 | `ExtendHeader` | `"EXTEND"` | Sentinel command to relay nodes for circuit extension |
-| `ConnectHeader` | `"CONNECT"` | Sentinel command to exit nodes for internet egress |
-| `RendezvousRelay` | `"shadowlink-relay"` | Kad-DHT rendezvous namespace for relay nodes |
-| `RendezvousExit` | `"shadowlink-exit"` | Kad-DHT rendezvous namespace for exit nodes |
+| `ConnectHeader` | `"CONNECT"` | Sentinel command to exit nodes for internet egress (target follows, ExitKey-encrypted) |
+| `TargetRecordSize` | `512` | Fixed, padded size of the encrypted exit-target record |
+| `RendezvousRelay` | `"shadowlink-v2-relay"` | Kad-DHT rendezvous namespace for relay nodes |
+| `RendezvousExit` | `"shadowlink-v2-exit"` | Kad-DHT rendezvous namespace for exit nodes |
 | `DefaultP2PPort` | `9000` | Default listening port for libp2p incoming streams |
 | `DefaultSOCKSPort` | `1080` | Default listening port for local SOCKS5 proxy |
 | `MaxFrameSize` | `131072` (128 KiB) | Maximum allowed frame size to prevent OOM attacks |
